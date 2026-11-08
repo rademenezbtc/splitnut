@@ -1125,6 +1125,7 @@ checksum = "9a31d2a3fbaaeb2af2368bbdd904aa8e812d3c04a1ee10d3171f52d556e5d0a3"
 dependencies = [
  "futures-channel",
  "futures-core",
+ "futures-executor",
  "futures-io",
  "futures-sink",
  "futures-task",
@@ -1146,6 +1147,17 @@ name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+
+[[package]]
+name = "futures-executor"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "031b47cf1a3c6cc8bc2fc76cd437f521619387907d469316e7c0bc278f1f5432"
+dependencies = [
+ "futures-core",
+ "futures-task",
+ "futures-util",
+]
 
 [[package]]
 name = "futures-io"
@@ -3635,13 +3647,16 @@ dependencies = [
  "cdk-common",
  "cdk-signatory",
  "clap",
+ "futures",
  "mdk-core",
  "mdk-memory-storage",
  "nostr-sdk",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "splitnut-core",
  "splitnut-proto",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3656,6 +3671,7 @@ dependencies = [
  "k256",
  "rand_core 0.6.4",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.21",
 ]
@@ -3667,6 +3683,7 @@ dependencies = [
  "anyhow",
  "cashu",
  "clap",
+ "hex",
  "k256",
  "rand_core 0.6.4",
  "serde",

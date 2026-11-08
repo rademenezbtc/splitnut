@@ -18,6 +18,8 @@
 
 pub mod conv;
 pub mod error;
+pub mod guardian;
+pub mod keyfile;
 pub mod shamir;
 pub mod sign;
 pub mod verify;

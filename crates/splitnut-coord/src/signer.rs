@@ -109,6 +109,7 @@ impl ThresholdSigner {
     }
 
     fn quorum_error(&self, answered: usize) -> Error {
+        warn!(answered, needed = self.t, "quorum unavailable: refusing");
         custom(format!("SplitNut quorum unavailable: {answered} of {} required guardians answered", self.t))
     }
 

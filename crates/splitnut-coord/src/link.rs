@@ -48,6 +48,7 @@ impl LocalGuardian {
     }
 
     /// Requests holding nonces (tests, dashboard).
+    #[allow(dead_code)]
     pub async fn pending(&self) -> usize {
         self.inner.lock().await.pending_requests()
     }

@@ -19,7 +19,10 @@ Built for [Nut November 2026](https://nutnovember.org). Work in progress.
 
 - [x] **Milestone 1, spike:** cdk-mintd with no local keys, signing through a remote signer;
       mint, swap and melt with cdk-cli (`scripts/spike.sh`, findings in [docs/spike.md](docs/spike.md))
-- [ ] Milestone 2: threshold maths, 2-of-3 in process
+- [x] **Milestone 2, threshold signing in process:** stock cdk-mintd signs through
+      `splitnut-coord` with three guardians, 2-of-3. cdk-cli mints, swaps and melts, and checks
+      the DLEQ of every combined signature. One guardian down still works; two down is
+      refused with "quorum unavailable" (`scripts/m2.sh`)
 - [ ] Milestone 3: guardians as separate processes over Marmot
 - [ ] Milestone 4: two-round DLEQ, guardian ledger and issuance cap, dashboard
 - [ ] Milestone 5: demo video, deck, submission
@@ -43,13 +46,27 @@ wallet ──HTTP──▶ cdk-mintd (unchanged, no keys)
 | `splitnut-guardian` | Guardian daemon |
 | `splitnut-coord` | Remote signer for cdk-mintd plus Marmot fan-out and dashboard |
 
-## Run the spike
+## Run it
 
 ```sh
 git clone https://github.com/cashubtc/cdk && cd cdk && git checkout v0.18.3
-cargo build --release -p cdk-mintd -p cdk-signatory -p cdk-cli   # needs protoc
-cd ../splitnut && CDK_BIN=../cdk/target/release ./scripts/spike.sh
+cargo build --release -p cdk-mintd -p cdk-cli   # needs protoc
+cd ../splitnut && CDK_BIN=../cdk/target/release ./scripts/m2.sh
 ```
+
+`m2.sh` deals a 2-of-3 keyset, starts the coordinator and a keyless cdk-mintd, then runs
+cdk-cli through mint, send, receive, double spend, melt, one guardian down and two down.
+
+## How the signing works
+
+Each mint key `k` (one per amount) is split t-of-n by the dealer. For a blinded message `B'`
+the coordinator runs two rounds with t guardians: each returns `k_i·B'` plus nonce
+commitments `r_i·G` and `r_i·B'`, then `s_i = r_i + e·k_i` for the NUT-12 challenge `e`.
+Lagrange-combined, this is exactly the signature and DLEQ proof a single-key mint would
+produce, so wallets cannot tell the difference. Every share is checked against the
+guardian's public share before combining, and a cheating guardian is named and excluded.
+Proof checks (`verify_proofs`) work the same way in one round. Details are in
+`crates/splitnut-core`.
 
 ## Threat model (short)
 

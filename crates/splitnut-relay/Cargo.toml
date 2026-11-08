@@ -1,0 +1,19 @@
+[package]
+name = "splitnut-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "splitnut-relay"
+path = "src/main.rs"
+
+[dependencies]
+nostr-relay-builder.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

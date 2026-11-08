@@ -6,6 +6,8 @@ members = [
     "crates/splitnut-dealer",
     "crates/splitnut-guardian",
     "crates/splitnut-coord",
+    "crates/splitnut-marmot",
+    "crates/splitnut-relay",
 ]
 
 [workspace.package]
@@ -24,7 +26,10 @@ cdk-signatory = { version = "=0.18.3", default-features = false, features = ["gr
 # Marmot: mdk-core 0.8 is MLS-only (events in, events out); nostr-sdk does the relay I/O.
 mdk-core = { version = "=0.8.0" }
 mdk-memory-storage = { version = "=0.8.0" }
-nostr-sdk = { version = "0.44", default-features = false }
+mdk-sqlite-storage = { version = "=0.8.0" }
+mdk-storage-traits = { version = "=0.8.0" }
+nostr-sdk = { version = "=0.44.1", default-features = false, features = ["nip59"] }
+nostr-relay-builder = { version = "=0.44.1" }
 
 k256 = { version = "0.13", features = ["arithmetic", "serde"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
@@ -44,3 +49,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 splitnut-core = { path = "crates/splitnut-core" }
 splitnut-proto = { path = "crates/splitnut-proto" }
+splitnut-marmot = { path = "crates/splitnut-marmot" }

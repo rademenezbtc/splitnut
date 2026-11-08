@@ -1,0 +1,36 @@
+[2m2026-11-08T04:55:30.177905Z[0m [32m INFO[0m [2mrefinery_core::traits[0m[2m:[0m schema history table is empty, going to apply all migrations
+[2m2026-11-08T04:55:30.177966Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m going to apply 5 migrations in multiple transactions.
+[2m2026-11-08T04:55:30.177973Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V1__initial_schema ...
+[2m2026-11-08T04:55:30.187213Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V2__add_processed_at_to_messages ...
+[2m2026-11-08T04:55:30.193977Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V3__add_processed_at_first_sort_index ...
+[2m2026-11-08T04:55:30.198786Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V4__add_self_update_tracking ...
+[2m2026-11-08T04:55:30.202759Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V5__add_label_to_group_exporter_secrets ...
+[2m2026-11-08T04:55:30.207599Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: initial_schema (version: 1)
+[2m2026-11-08T04:55:30.207615Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_processed_at_to_messages (version: 2)
+[2m2026-11-08T04:55:30.207619Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_processed_at_first_sort_index (version: 3)
+[2m2026-11-08T04:55:30.207623Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_self_update_tracking (version: 4)
+[2m2026-11-08T04:55:30.207626Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_label_to_group_exporter_secrets (version: 5)
+[2m2026-11-08T04:55:30.211661Z[0m [32m INFO[0m [2mnostr_relay_pool::relay::inner[0m[2m:[0m Connected to 'ws://127.0.0.1:7777'
+[2m2026-11-08T04:55:30.211951Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m guardian started [3mindex[0m[2m=[0m3 [3mnpub[0m[2m=[0mnpub1f38wttzncrg3t48kxegj3xdndyzl3kxqs0ey3rlja0guql6zfwzs4ra6df [3mkeyset[0m[2m=[0m0138fc8369e7b65228d1f5848679dd420d57d14d8c2e5d4cf414bbdfe126a4656b
+[2m2026-11-08T04:55:30.211985Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m waiting to be welcomed into the group
+[2m2026-11-08T04:55:30.224908Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m key package published; waiting for the coordinator's welcome
+[2m2026-11-08T04:55:33.304609Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m key package published; waiting for the coordinator's welcome
+[2m2026-11-08T04:55:33.536547Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m joined the guardian group [3mgroup[0m[2m=[0m4959c38e7483e6f00b3c6e7e8d258e644c4aee0634dec2e5490e7359c2627e23
+[2m2026-11-08T04:55:38.418642Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m1 [3mkind[0m[2m=[0m"sign1"
+[2m2026-11-08T04:55:39.256600Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m2 [3mkind[0m[2m=[0m"verify"
+[2m2026-11-08T04:55:39.581818Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m3 [3mkind[0m[2m=[0m"sign1"
+[2m2026-11-08T04:55:40.335636Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m4 [3mkind[0m[2m=[0m"verify"
+[2m2026-11-08T04:55:40.617915Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m5 [3mkind[0m[2m=[0m"verify"
+[2m2026-11-08T04:55:40.892336Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m6 [3mkind[0m[2m=[0m"verify"
+[2m2026-11-08T04:55:41.127361Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m7 [3mkind[0m[2m=[0m"sign1"
+[2m2026-11-08T04:55:41.335481Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m7 [3mkind[0m[2m=[0m"sign2"
+[2m2026-11-08T04:55:41.596328Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m8 [3mkind[0m[2m=[0m"verify"
+[2m2026-11-08T04:55:41.814570Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m9 [3mkind[0m[2m=[0m"verify"
+[2m2026-11-08T04:55:41.969725Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m10 [3mkind[0m[2m=[0m"sign1"
+[2m2026-11-08T04:55:42.120566Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m10 [3mkind[0m[2m=[0m"sign2"
+[2m2026-11-08T04:55:43.305599Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m11 [3mkind[0m[2m=[0m"sign1"
+[2m2026-11-08T04:55:49.751095Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m12 [3mkind[0m[2m=[0m"sign1"
+[2m2026-11-08T04:55:49.923303Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m12 [3mkind[0m[2m=[0m"sign2"
+[2m2026-11-08T04:55:51.143634Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m13 [3mkind[0m[2m=[0m"sign1"
+[2m2026-11-08T04:55:51.297592Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m13 [3mkind[0m[2m=[0m"sign2"
+[2m2026-11-08T04:55:51.529645Z[0m [32m INFO[0m [2msplitnut_guardian[0m[2m:[0m answered [3mreq[0m[2m=[0m14 [3mkind[0m[2m=[0m"verify"

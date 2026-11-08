@@ -1,0 +1,39 @@
+[2m2026-11-08T04:55:30.178246Z[0m [32m INFO[0m [2mrefinery_core::traits[0m[2m:[0m schema history table is empty, going to apply all migrations
+[2m2026-11-08T04:55:30.178371Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m going to apply 5 migrations in multiple transactions.
+[2m2026-11-08T04:55:30.178387Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V1__initial_schema ...
+[2m2026-11-08T04:55:30.197923Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V2__add_processed_at_to_messages ...
+[2m2026-11-08T04:55:30.208960Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V3__add_processed_at_first_sort_index ...
+[2m2026-11-08T04:55:30.218223Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V4__add_self_update_tracking ...
+[2m2026-11-08T04:55:30.226214Z[0m [32m INFO[0m [2mrefinery_core::traits::sync[0m[2m:[0m applying migration: V5__add_label_to_group_exporter_secrets ...
+[2m2026-11-08T04:55:30.233388Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: initial_schema (version: 1)
+[2m2026-11-08T04:55:30.233411Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_processed_at_to_messages (version: 2)
+[2m2026-11-08T04:55:30.233416Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_processed_at_first_sort_index (version: 3)
+[2m2026-11-08T04:55:30.233420Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_self_update_tracking (version: 4)
+[2m2026-11-08T04:55:30.233425Z[0m [32m INFO[0m [2mmdk_sqlite_storage::migrations[0m[2m:[0m Applied migration: add_label_to_group_exporter_secrets (version: 5)
+[2m2026-11-08T04:55:30.237514Z[0m [32m INFO[0m [2mnostr_relay_pool::relay::inner[0m[2m:[0m Connected to 'ws://127.0.0.1:7777'
+[2m2026-11-08T04:55:30.238024Z[0m [32m INFO[0m [2msplitnut_coord[0m[2m:[0m coordinator Marmot node started [3mnpub[0m[2m=[0mnpub1x45rlgdypypj0rap6mc2s6gc6dtknd7rvyk9s8m6l5kkr7z3ex9s7zwgrz [3mrelays[0m[2m=[0m["ws://127.0.0.1:7777"]
+[2m2026-11-08T04:55:30.240517Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m waiting for guardian key packages [3mwaiting_for[0m[2m=[0m["npub1vpfzxsyqtr7kd2nzk20xn7qtsagmjjduenldawgxc4fd65thg7wqdmhrrm"]
+[2m2026-11-08T04:55:30.247043Z[0m [32m INFO[0m [2msplitnut_coord[0m[2m:[0m SplitNut coordinator ready (holds no key material) [3mkeyset[0m[2m=[0m0138fc8369e7b65228d1f5848679dd420d57d14d8c2e5d4cf414bbdfe126a4656b [3mt[0m[2m=[0m2 [3mn[0m[2m=[0m3 [3moffline[0m[2m=[0m[]
+[2m2026-11-08T04:55:30.247086Z[0m [32m INFO[0m [2mcdk_signatory::proto::server[0m[2m:[0m Starting RPC server 127.0.0.1:15060
+[2m2026-11-08T04:55:30.247107Z[0m [32m INFO[0m [2mcdk_signatory::proto::server[0m[2m:[0m TLS configuration found, starting secure server
+[2m2026-11-08T04:55:33.346944Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m welcome sent [3mguardian[0m[2m=[0mnpub1syc057n6th9eayhqhup38kzf8uq2p2xf9qvygepmmthvmsp5r8rsfgwhsq
+[2m2026-11-08T04:55:33.358833Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m welcome sent [3mguardian[0m[2m=[0mnpub1vpfzxsyqtr7kd2nzk20xn7qtsagmjjduenldawgxc4fd65thg7wqdmhrrm
+[2m2026-11-08T04:55:33.368928Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m welcome sent [3mguardian[0m[2m=[0mnpub1f38wttzncrg3t48kxegj3xdndyzl3kxqs0ey3rlja0guql6zfwzs4ra6df
+[2m2026-11-08T04:55:33.369253Z[0m [32m INFO[0m [2msplitnut_marmot[0m[2m:[0m group created [3mmembers[0m[2m=[0m4
+[2m2026-11-08T04:55:33.369378Z[0m [32m INFO[0m [2msplitnut_coord[0m[2m:[0m guardian group ready
+[2m2026-11-08T04:55:39.032386Z[0m [32m INFO[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m blind_sign ok [3mreq[0m[2m=[0m1 [3msigners[0m[2m=[0m[1, 2] [3moutputs[0m[2m=[0m30 [3mamount[0m[2m=[0m1000 [3mattempt[0m[2m=[0m1 [3mms[0m[2m=[0m862
+[2m2026-11-08T04:55:39.335588Z[0m [32m INFO[0m [1mverify_proofs[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m verify_proofs ok [3mreq[0m[2m=[0m2 [3msigners[0m[2m=[0m[1, 2] [3mproofs[0m[2m=[0m4 [3mms[0m[2m=[0m230
+[2m2026-11-08T04:55:40.152566Z[0m [32m INFO[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m blind_sign ok [3mreq[0m[2m=[0m3 [3msigners[0m[2m=[0m[1, 2] [3moutputs[0m[2m=[0m24 [3mamount[0m[2m=[0m400 [3mattempt[0m[2m=[0m1 [3mms[0m[2m=[0m813
+[2m2026-11-08T04:55:40.426503Z[0m [32m INFO[0m [1mverify_proofs[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m verify_proofs ok [3mreq[0m[2m=[0m4 [3msigners[0m[2m=[0m[1, 2] [3mproofs[0m[2m=[0m4 [3mms[0m[2m=[0m229
+[2m2026-11-08T04:55:40.706346Z[0m [32m INFO[0m [1mverify_proofs[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m verify_proofs ok [3mreq[0m[2m=[0m5 [3msigners[0m[2m=[0m[1, 2] [3mproofs[0m[2m=[0m4 [3mms[0m[2m=[0m231
+[2m2026-11-08T04:55:41.007107Z[0m [32m INFO[0m [1mverify_proofs[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m verify_proofs ok [3mreq[0m[2m=[0m6 [3msigners[0m[2m=[0m[1, 2] [3mproofs[0m[2m=[0m9 [3mms[0m[2m=[0m282
+[2m2026-11-08T04:55:41.386455Z[0m [32m INFO[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m blind_sign ok [3mreq[0m[2m=[0m7 [3msigners[0m[2m=[0m[1, 3] [3moutputs[0m[2m=[0m1 [3mamount[0m[2m=[0m1 [3mattempt[0m[2m=[0m1 [3mms[0m[2m=[0m367
+[2m2026-11-08T04:55:41.679669Z[0m [32m INFO[0m [1mverify_proofs[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m verify_proofs ok [3mreq[0m[2m=[0m8 [3msigners[0m[2m=[0m[2, 3] [3mproofs[0m[2m=[0m4 [3mms[0m[2m=[0m224
+[2m2026-11-08T04:55:41.869252Z[0m [32m INFO[0m [1mverify_proofs[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m verify_proofs ok [3mreq[0m[2m=[0m9 [3msigners[0m[2m=[0m[2, 3] [3mproofs[0m[2m=[0m2 [3mms[0m[2m=[0m179
+[2m2026-11-08T04:55:42.186509Z[0m [32m INFO[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m blind_sign ok [3mreq[0m[2m=[0m10 [3msigners[0m[2m=[0m[2, 3] [3moutputs[0m[2m=[0m3 [3mamount[0m[2m=[0m20 [3mattempt[0m[2m=[0m1 [3mms[0m[2m=[0m313
+[2m2026-11-08T04:55:48.226404Z[0m [33m WARN[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m round 1: timed out [3mreq[0m[2m=[0m11 [3mguardian[0m[2m=[0m1
+[2m2026-11-08T04:55:48.226622Z[0m [33m WARN[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m round 1: timed out [3mreq[0m[2m=[0m11 [3mguardian[0m[2m=[0m2
+[2m2026-11-08T04:55:48.323925Z[0m [33m WARN[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m quorum unavailable: refusing [3manswered[0m[2m=[0m1 [3mneeded[0m[2m=[0m2
+[2m2026-11-08T04:55:50.028760Z[0m [32m INFO[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m blind_sign ok [3mreq[0m[2m=[0m12 [3msigners[0m[2m=[0m[2, 3] [3moutputs[0m[2m=[0m6 [3mamount[0m[2m=[0m50 [3mattempt[0m[2m=[0m1 [3mms[0m[2m=[0m415
+[2m2026-11-08T04:55:51.354000Z[0m [32m INFO[0m [1mblind_sign[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m blind_sign ok [3mreq[0m[2m=[0m13 [3msigners[0m[2m=[0m[2, 3] [3moutputs[0m[2m=[0m3 [3mamount[0m[2m=[0m50 [3mattempt[0m[2m=[0m1 [3mms[0m[2m=[0m301
+[2m2026-11-08T04:55:51.600430Z[0m [32m INFO[0m [1mverify_proofs[0m[2m:[0m [2msplitnut_coord::signer[0m[2m:[0m verify_proofs ok [3mreq[0m[2m=[0m14 [3msigners[0m[2m=[0m[2, 3] [3mproofs[0m[2m=[0m4 [3mms[0m[2m=[0m210

@@ -11,7 +11,8 @@ guardians; any *t* of them must cooperate to sign, so the operator alone cannot 
 * **No mint fork.** Stock `cdk-mintd` already sends all signing to a remote signer over gRPC.
   SplitNut *is* that signer: a coordinator that gathers threshold shares from guardians.
 * **Guardians coordinate over Marmot** (MLS over Nostr): an end-to-end encrypted group where
-  relays see only ciphertext.
+  relays see only ciphertext. Any Nostr relays work; `splitnut-relay` is a local one with a
+  wire tap that counts events and flags any plaintext.
 
 Built for [Nut November 2026](https://nutnovember.org). Work in progress.
 
@@ -23,7 +24,10 @@ Built for [Nut November 2026](https://nutnovember.org). Work in progress.
       `splitnut-coord` with three guardians, 2-of-3. cdk-cli mints, swaps and melts, and checks
       the DLEQ of every combined signature. One guardian down still works; two down is
       refused with "quorum unavailable" (`scripts/m2.sh`)
-- [ ] Milestone 3: guardians as separate processes over Marmot
+- [x] **Milestone 3, guardians over Marmot:** three guardian processes with their own
+      Nostr keys and the coordinator form one MLS group over Nostr. Killing a guardian keeps
+      the mint working, killing a second makes it refuse, and restarting one resumes signing
+      from its encrypted state. The relay sees only ciphertext (`scripts/m3.sh`)
 - [ ] Milestone 4: two-round DLEQ, guardian ledger and issuance cap, dashboard
 - [ ] Milestone 5: demo video, deck, submission
 
@@ -45,17 +49,26 @@ wallet ──HTTP──▶ cdk-mintd (unchanged, no keys)
 | `splitnut-dealer` | One-off key generation and t-of-n splitting |
 | `splitnut-guardian` | Guardian daemon |
 | `splitnut-coord` | Remote signer for cdk-mintd plus Marmot fan-out and dashboard |
+| `splitnut-marmot` | Marmot node: MDK + Nostr client in one actor, group setup, encrypted MLS state |
+| `splitnut-relay` | Local in-memory relay with a wire tap |
 
 ## Run it
 
 ```sh
 git clone https://github.com/cashubtc/cdk && cd cdk && git checkout v0.18.3
 cargo build --release -p cdk-mintd -p cdk-cli   # needs protoc
-cd ../splitnut && CDK_BIN=../cdk/target/release ./scripts/m2.sh
+cd ../splitnut && CDK_BIN=../cdk/target/release ./scripts/m3.sh
 ```
 
-`m2.sh` deals a 2-of-3 keyset, starts the coordinator and a keyless cdk-mintd, then runs
-cdk-cli through mint, send, receive, double spend, melt, one guardian down and two down.
+`m3.sh` deals a 2-of-3 keyset, gives the coordinator and each guardian a Nostr key, starts a
+local relay, three guardian processes, the coordinator and a keyless cdk-mintd, then runs
+cdk-cli through mint, send, receive, double spend and melt, kills guardians one by one, and
+restarts one. To use public relays instead:
+`RELAYS="wss://relay.damus.io wss://nos.lol" CDK_BIN=... ./scripts/m3.sh`.
+
+Typical run on a laptop-class machine with a local relay: the group forms in about 4 s; a
+two-round threshold signature takes 0.3 to 0.9 s for 1 to 30 outputs, and a proof check
+about 0.2 s.
 
 ## How the signing works
 

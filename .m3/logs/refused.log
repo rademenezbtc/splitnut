@@ -1,0 +1,7 @@
+Recovered 1 operations, 0 compensated, 0 skipped, 0 failed
+Quote: id=01a1b983-2584-71f1-a5fe-895628b4800b, state=UNPAID, amount=50, expiry=1794117342
+Please pay: lnbc500n1p40qqxwdqqpp548zd5y44kzxtpckua5gswjfgukzv6aa2d34l7du6469qlmulehkqsp59g4z52329g4z52329g4z52329g4z52329g4z52329g4z52329g4q9qrsgqcqzys3mzrr9r23nfcas8d5s53x7fgv63j98kkdy0vmf54skleuevxn06jpwmmd3kf5xarcrc4g03302xvrjk4ymw4nmtu4y688m5xxpedxsgpgt04je
+Quote state: UNPAID
+Quote state: PAID
+2026-11-08T04:55:48.325622Z ERROR cdk_cli::sub_commands::mint: Proof streams ended with UnknownErrorResponse("code: 50000, detail: ``SplitNut quorum unavailable: 1 of 2 required guardians answered``")
+Error: Unknown error response: `code: 50000, detail: ``SplitNut quorum unavailable: 1 of 2 required guardians answered```

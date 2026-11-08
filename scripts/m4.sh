@@ -60,14 +60,14 @@ if [ "$RELAYS" = "ws://127.0.0.1:7777" ]; then
 fi
 for i in 1 2 3; do start_guardian $i; done
 "$SN/splitnut-coord" --public "$W/shares/public.json" --roster "$W/roster.json" "${RELAY_ARGS[@]}" \
-  --keys "$W/keys/coord.nsec" --tls-dir "$W/certs" --heartbeat-secs 2 \
+  --keys "$W/keys/coord.nsec" --tls-dir "$W/certs" --heartbeat-secs "${HEARTBEAT:-2}" \
   --dashboard 127.0.0.1:8090 --relay-tap-url http://127.0.0.1:7778/stats > "$W/logs/coord.log" 2>&1 &
 T0=$(date +%s.%N)
 wait_log "$W/logs/coord.log" "guardian group ready" 120
 for i in 1 2 3; do wait_log "$W/logs/guardian-$i.log" "joined the guardian group" 60; done
 echo "Marmot group formed in $(printf %.1f "$(echo "$(date +%s.%N) - $T0" | bc)") s (coordinator + 3 guardians)"
 
-sed "s#@CERTS@#$W/certs#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
+sed "s#@CERTS@#$W/certs#; s#@URL@#http://127.0.0.1:8085/#; s#@LISTEN@#127.0.0.1#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
 "$BIN/cdk-mintd" --work-dir "$W/mint" config init --new-mint --file "$W/mintd.toml" > /dev/null
 "$BIN/cdk-mintd" --work-dir "$W/mint" > "$W/logs/mint.log" 2>&1 &
 for _ in $(seq 30); do curl -sf "${MINT}v1/keysets" >/dev/null && break; sleep 1; done
@@ -104,7 +104,7 @@ timed "${B[@]}" receive --allow-untrusted "$TOKEN" | tail -1
 
 echo "== kill guardian 2 (pid ${GPID[2]}): mint 50 into A (must be refused, at once)"
 kill "${GPID[2]}"; wait "${GPID[2]}" 2>/dev/null || true
-sleep 3   # one missed heartbeat
+sleep $(( ${HEARTBEAT:-2} + 1 ))   # one missed heartbeat
 s=$(date +%s.%N)
 if timeout 60 "${A[@]}" mint "$MINT" 50 > "$W/logs/refused.log" 2>&1; then echo "FAIL: minted with one guardian"; exit 1; fi
 grep -o "quorum unavailable[^\`\"]*" "$W/logs/refused.log" | head -1
@@ -123,7 +123,7 @@ grep -o "hourly issuance cap[^;)]*" "$W/logs/cap.log" | head -1
 
 BA=$(balance "${A[@]}"); BB=$(balance "${B[@]}")
 echo "A: $BA sat, B: $BB sat, together $((BA + BB)) sat"
-sleep 3   # let a heartbeat carry the latest ledgers
+sleep $(( ${HEARTBEAT:-2} + 1 ))   # let a heartbeat carry the latest ledgers
 echo "== guardian ledgers (from the dashboard API)"
 curl -s "${DASH}state" > "$W/state.json"
 python3 - "$W/state.json" "$((BA + BB))" <<'PY' || { echo "FAIL: ledger outstanding does not match the wallets"; exit 1; }

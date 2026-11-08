@@ -61,7 +61,7 @@ wait_log "$W/logs/coord.log" "guardian group ready" 120
 for i in 1 2 3; do wait_log "$W/logs/guardian-$i.log" "joined the guardian group" 60; done
 echo "Marmot group formed in $(printf %.1f "$(echo "$(date +%s.%N) - $T0" | bc)") s (coordinator + 3 guardians)"
 
-sed "s#@CERTS@#$W/certs#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
+sed "s#@CERTS@#$W/certs#; s#@URL@#http://127.0.0.1:8085/#; s#@LISTEN@#127.0.0.1#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
 "$BIN/cdk-mintd" --work-dir "$W/mint" config init --new-mint --file "$W/mintd.toml" > /dev/null
 "$BIN/cdk-mintd" --work-dir "$W/mint" > "$W/logs/mint.log" 2>&1 &
 for _ in $(seq 30); do curl -sf "${MINT}v1/keysets" >/dev/null && break; sleep 1; done

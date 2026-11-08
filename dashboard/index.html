@@ -284,7 +284,7 @@
       n.classList.remove("refused");
     } else {
       const err = clean(ev.error);
-      const m = /(\d+) of (\d+) required/.exec(err);
+      const m = /(\d+) of (?:the )?(\d+) required/.exec(err);
       if (/hourly issuance cap/.test(err)) {
         n.textContent = `Refused: ${sat(ev.amount)} is over the guardians' hourly issuance cap.`;
       } else if (/offline|timed out/.test(err) && !/invalid/.test(err)) {

@@ -1,0 +1,28 @@
+[package]
+name = "splitnut-coord"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "splitnut-coord"
+path = "src/main.rs"
+
+[dependencies]
+splitnut-core.workspace = true
+splitnut-proto.workspace = true
+cdk-signatory.workspace = true
+cdk-common.workspace = true
+mdk-core.workspace = true
+mdk-memory-storage.workspace = true
+nostr-sdk.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

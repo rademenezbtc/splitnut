@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/splitnut-core",
+    "crates/splitnut-proto",
+    "crates/splitnut-dealer",
+    "crates/splitnut-guardian",
+    "crates/splitnut-coord",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rademenezbtc/splitnut"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# CDK is pinned exactly: the signatory gRPC schema must match the cdk-mintd binary we run.
+cashu = { version = "=0.18.3" }
+cdk-common = { version = "=0.18.3", default-features = false, features = ["mint"] }
+cdk-signatory = { version = "=0.18.3", default-features = false, features = ["grpc"] }
+
+# Marmot: mdk-core 0.8 is MLS-only (events in, events out); nostr-sdk does the relay I/O.
+mdk-core = { version = "=0.8.0" }
+mdk-memory-storage = { version = "=0.8.0" }
+nostr-sdk = { version = "0.44", default-features = false }
+
+k256 = { version = "0.13", features = ["arithmetic", "serde"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+hex = "0.4"
+
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+splitnut-core = { path = "crates/splitnut-core" }
+splitnut-proto = { path = "crates/splitnut-proto" }

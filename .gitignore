@@ -1,0 +1,7 @@
+/target
+/.spike
+certs/
+*.key
+*.sqlite
+*.db
+shares/

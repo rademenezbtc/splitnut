@@ -9,7 +9,7 @@ use rand_core::OsRng;
 use splitnut_core::guardian::{Guardian, RequestId, SignItem, VerifyItem};
 use splitnut_core::sign::Round1;
 use splitnut_core::verify::Partial;
-use splitnut_core::{Idx, Scalar};
+use splitnut_core::{conv, Idx, Scalar};
 use tokio::sync::Mutex;
 
 #[derive(Debug, thiserror::Error)]
@@ -26,7 +26,9 @@ pub trait GuardianLink: Send + Sync {
     async fn round1(&self, req: RequestId, items: Vec<SignItem>) -> Result<Vec<Round1>, LinkError>;
     async fn round2(&self, req: RequestId, items: Vec<SignItem>, es: Vec<Scalar>) -> Result<Vec<Scalar>, LinkError>;
     async fn abort(&self, req: RequestId);
-    async fn verify(&self, items: Vec<VerifyItem>) -> Result<Vec<Partial>, LinkError>;
+    /// Partial evaluations for proofs given as `(amount, secret)`; the guardian computes
+    /// `Y = hash_to_curve(secret)` itself.
+    async fn verify(&self, req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError>;
 }
 
 /// A guardian living inside the coordinator process, for tests and milestone 2.
@@ -87,9 +89,15 @@ impl GuardianLink for LocalGuardian {
         self.inner.lock().await.abort(req);
     }
 
-    async fn verify(&self, items: Vec<VerifyItem>) -> Result<Vec<Partial>, LinkError> {
+    async fn verify(&self, _req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError> {
         self.gate().await?;
+        let refused = |e: splitnut_core::Error| LinkError::Refused(self.index, e.to_string());
+        let items = items
+            .iter()
+            .map(|(amount, secret)| Ok(VerifyItem { amount: *amount, y: conv::hash_to_curve(secret.as_bytes())? }))
+            .collect::<Result<Vec<_>, splitnut_core::Error>>()
+            .map_err(refused)?;
         let g = self.inner.lock().await;
-        g.verify(&items, &mut OsRng).map_err(|e| LinkError::Refused(self.index, e.to_string()))
+        g.verify(&items, &mut OsRng).map_err(refused)
     }
 }

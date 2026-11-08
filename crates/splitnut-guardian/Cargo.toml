@@ -13,13 +13,9 @@ path = "src/main.rs"
 [dependencies]
 splitnut-core.workspace = true
 splitnut-proto.workspace = true
-mdk-core.workspace = true
-mdk-memory-storage.workspace = true
-nostr-sdk.workspace = true
-k256.workspace = true
+splitnut-marmot.workspace = true
+rand_core.workspace = true
 tokio.workspace = true
-serde.workspace = true
-serde_json.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

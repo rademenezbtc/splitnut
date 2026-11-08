@@ -3823,6 +3823,7 @@ dependencies = [
  "serde",
  "serde_json",
  "splitnut-core",
+ "splitnut-marmot",
  "splitnut-proto",
  "thiserror 2.0.21",
  "tokio",
@@ -3865,13 +3866,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "k256",
- "mdk-core",
- "mdk-memory-storage",
- "nostr-sdk",
- "serde",
- "serde_json",
+ "rand_core 0.6.4",
  "splitnut-core",
+ "splitnut-marmot",
  "splitnut-proto",
  "tokio",
  "tracing",
@@ -3902,9 +3899,9 @@ dependencies = [
 name = "splitnut-proto"
 version = "0.1.0"
 dependencies = [
- "hex",
  "serde",
  "serde_json",
+ "splitnut-core",
 ]
 
 [[package]]

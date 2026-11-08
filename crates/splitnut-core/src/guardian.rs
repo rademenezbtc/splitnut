@@ -3,6 +3,7 @@
 //! Marmot guardian daemon (milestone 3) both wrap this.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 
 use k256::{ProjectivePoint, Scalar};
 use rand_core::CryptoRngCore;
@@ -33,9 +34,13 @@ pub struct Guardian {
     index: Idx,
     keyset_id: String,
     shares: BTreeMap<u64, Scalar>,
-    /// Round-1 nonces waiting for round 2, per request.
-    pending: HashMap<RequestId, Vec<Nonce>>,
+    /// Round-1 nonces waiting for round 2, per request, with when they were made.
+    pending: HashMap<RequestId, (Instant, Vec<Nonce>)>,
 }
+
+/// Unused round-1 nonces are dropped after this long (an abort may have overtaken its
+/// request on the relay, or the coordinator may have gone away).
+pub const NONCE_TTL: Duration = Duration::from_secs(120);
 
 impl Guardian {
     pub fn new(index: Idx, keyset_id: String, shares: BTreeMap<u64, Scalar>) -> Self {
@@ -67,6 +72,7 @@ impl Guardian {
         items: &[SignItem],
         rng: &mut impl CryptoRngCore,
     ) -> Result<Vec<Round1>, Error> {
+        self.pending.retain(|_, (made, _)| made.elapsed() < NONCE_TTL);
         if self.pending.contains_key(&req) {
             return Err(Error::InvalidSignerSet);
         }
@@ -77,13 +83,13 @@ impl Guardian {
             nonces.push(nonce);
             out.push(r1);
         }
-        self.pending.insert(req, nonces);
+        self.pending.insert(req, (Instant::now(), nonces));
         Ok(out)
     }
 
     /// Round 2 for a batch: one challenge per item, in round-1 order. Consumes the nonces.
     pub fn round2(&mut self, req: RequestId, items: &[SignItem], es: &[Scalar]) -> Result<Vec<Scalar>, Error> {
-        let nonces = self.pending.remove(&req).ok_or(Error::MissingShare(self.index))?;
+        let (_, nonces) = self.pending.remove(&req).ok_or(Error::MissingShare(self.index))?;
         if nonces.len() != es.len() || items.len() != es.len() {
             return Err(Error::NotEnoughShares { need: nonces.len(), got: es.len() });
         }

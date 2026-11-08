@@ -460,4 +460,4 @@ pub fn load_or_create_keys(path: &std::path::Path) -> anyhow::Result<Keys> {
     Ok(keys)
 }
 
-pub use nostr_sdk::prelude::{Keys as NostrKeys, PublicKey as NostrPublicKey, ToBech32 as NostrToBech32};
+pub use nostr_sdk::prelude::{Keys as NostrKeys, PublicKey as NostrPublicKey, Timestamp as NostrTimestamp, ToBech32 as NostrToBech32};

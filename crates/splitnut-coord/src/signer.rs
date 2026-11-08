@@ -20,6 +20,7 @@ use cdk_common::error::Error;
 use cdk_common::{Amount, BlindSignature, BlindedMessage, CurrencyUnit, Id, Keys, Proof, PublicKey};
 use cdk_signatory::signatory::{RotateKeyArguments, Signatory, SignatoryKeySet, SignatoryKeysets};
 use futures::future::join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use splitnut_core::guardian::{RequestId, SignItem, VerifyItem};
 use splitnut_core::keyfile::PublicKeyset;
 use splitnut_core::sign::{self, Round1, Session};
@@ -125,32 +126,41 @@ impl ThresholdSigner {
         keys: &[&AmountKeys],
         exclude: &[Idx],
     ) -> Result<Result<(Vec<Idx>, Vec<Triple>), Vec<Idx>>, Error> {
-        // Round 1: ask every guardian not excluded; keep the first t that answer, in index order.
-        let candidates: Vec<_> = self.guardians.iter().filter(|g| !exclude.contains(&g.index())).collect();
-        let replies = join_all(candidates.iter().map(|g| {
-            let items = items.to_vec();
-            async move { (g.index(), tokio::time::timeout(self.timeout, g.round1(req, items)).await) }
-        }))
-        .await;
+        // Round 1: ask every guardian not excluded and continue as soon as t have answered, so
+        // a dead guardian costs nothing. Everyone not chosen is told to drop its nonces.
+        let candidates: Vec<Idx> =
+            self.guardians.iter().map(|g| g.index()).filter(|i| !exclude.contains(i)).collect();
+        let mut futs: FuturesUnordered<_> = candidates
+            .iter()
+            .map(|i| {
+                let g = self.guardian(*i).clone();
+                let items = items.to_vec();
+                async move { (g.index(), tokio::time::timeout(self.timeout, g.round1(req, items)).await) }
+            })
+            .collect();
         let mut answered: Vec<(Idx, Vec<Round1>)> = vec![];
-        for (i, r) in replies {
+        while let Some((i, r)) = futs.next().await {
             match r {
-                Ok(Ok(v)) if v.len() == items.len() => answered.push((i, v)),
+                Ok(Ok(v)) if v.len() == items.len() => {
+                    answered.push((i, v));
+                    if answered.len() == self.t {
+                        break;
+                    }
+                }
                 Ok(Ok(_)) => warn!(req, guardian = i, "round 1: wrong number of items"),
                 Ok(Err(e)) => warn!(req, guardian = i, "round 1: {e}"),
                 Err(_) => warn!(req, guardian = i, "round 1: timed out"),
             }
         }
-        if answered.len() < self.t {
-            for (i, _) in &answered {
-                self.guardian(*i).abort(req).await;
-            }
-            return Err(self.quorum_error(answered.len()));
-        }
-        for (i, _) in &answered[self.t..] {
+        drop(futs);
+        answered.sort_by_key(|(i, _)| *i);
+        let chosen: Vec<Idx> = answered.iter().map(|(i, _)| *i).collect();
+        for i in candidates.iter().filter(|i| !chosen.contains(i) || answered.len() < self.t) {
             self.guardian(*i).abort(req).await;
         }
-        answered.truncate(self.t);
+        if answered.len() < self.t {
+            return Err(self.quorum_error(answered.len()));
+        }
         let set: Vec<Idx> = answered.iter().map(|(i, _)| *i).collect();
 
         let mut sessions = Vec::with_capacity(items.len());
@@ -269,29 +279,37 @@ impl Signatory for ThresholdSigner {
             cs.push(conv::point(&p.c).map_err(|_| Error::DHKE(cdk_common::dhke::Error::TokenNotVerified))?);
         }
 
-        let replies = join_all(self.guardians.iter().map(|g| {
-            let items = items.clone();
-            async move { (g.index(), tokio::time::timeout(self.timeout, g.verify(items)).await) }
-        }))
-        .await;
-        let mut answered: Vec<(Idx, Vec<Partial>)> = vec![];
-        for (i, r) in replies {
-            match r {
-                Ok(Ok(v)) if v.len() == items.len() => answered.push((i, v)),
-                Ok(Ok(_)) => warn!(req, guardian = i, "verify: wrong number of items"),
-                Ok(Err(e)) => warn!(req, guardian = i, "verify: {e}"),
-                Err(_) => warn!(req, guardian = i, "verify: timed out"),
-            }
-        }
+        let wire_items: Vec<(u64, String)> =
+            proofs.iter().map(|p| (u64::from(p.amount), p.secret.to_string())).collect();
+        let mut futs: FuturesUnordered<_> = self
+            .guardians
+            .iter()
+            .map(|g| {
+                let items = wire_items.clone();
+                async move { (g.index(), tokio::time::timeout(self.timeout, g.verify(req, items)).await) }
+            })
+            .collect();
 
-        // Use the first t honest responders; a guardian with a bad partial is dropped and the
-        // next one takes its place.
+        // Take responders as they arrive; check as soon as t honest ones are in. A guardian
+        // with a bad partial is dropped and the next responder takes its place.
+        let mut answered: Vec<(Idx, Vec<Partial>)> = vec![];
         let mut bad: Vec<Idx> = vec![];
         loop {
-            let set: Vec<&(Idx, Vec<Partial>)> = answered.iter().filter(|(i, _)| !bad.contains(i)).take(self.t).collect();
+            while answered.iter().filter(|(i, _)| !bad.contains(i)).count() < self.t {
+                match futs.next().await {
+                    Some((i, Ok(Ok(v)))) if v.len() == items.len() => answered.push((i, v)),
+                    Some((i, Ok(Ok(_)))) => warn!(req, guardian = i, "verify: wrong number of items"),
+                    Some((i, Ok(Err(e)))) => warn!(req, guardian = i, "verify: {e}"),
+                    Some((i, Err(_))) => warn!(req, guardian = i, "verify: timed out"),
+                    None => break,
+                }
+            }
+            let mut set: Vec<&(Idx, Vec<Partial>)> =
+                answered.iter().filter(|(i, _)| !bad.contains(i)).take(self.t).collect();
             if set.len() < self.t {
                 return Err(self.quorum_error(set.len()));
             }
+            set.sort_by_key(|(i, _)| *i);
             let mut flagged = None;
             for (j, (item, c)) in items.iter().zip(&cs).enumerate() {
                 let parts: Vec<_> = set.iter().map(|(i, v)| (*i, v[j])).collect();
@@ -364,8 +382,8 @@ mod tests {
         async fn abort(&self, req: RequestId) {
             self.0.abort(req).await
         }
-        async fn verify(&self, items: Vec<VerifyItem>) -> Result<Vec<Partial>, LinkError> {
-            let mut v = self.0.verify(items).await?;
+        async fn verify(&self, req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError> {
+            let mut v = self.0.verify(req, items).await?;
             for p in &mut v {
                 p.y_i += ProjectivePoint::GENERATOR;
             }

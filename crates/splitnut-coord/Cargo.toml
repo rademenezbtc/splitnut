@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 splitnut-core.workspace = true
 splitnut-proto.workspace = true
+splitnut-marmot.workspace = true
 cdk-signatory.workspace = true
 cdk-common.workspace = true
 mdk-core.workspace = true

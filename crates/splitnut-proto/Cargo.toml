@@ -7,6 +7,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+splitnut-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-hex.workspace = true

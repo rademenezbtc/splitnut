@@ -1,5 +1,10 @@
 /target
 /.spike
+# end-to-end test runs (logs, throwaway keys and wallets)
+/.m2
+/.m3
+/.m4
+*.nsec
 certs/
 *.key
 *.sqlite

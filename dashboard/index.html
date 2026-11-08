@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SplitNut live dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600&family=Source+Sans+3:wght@400;600&display=swap">
+<style>
+  :root {
+    --paper: #E9EDF1;
+    --paper-2: #F4F6F8;
+    --ink: #1C2740;
+    --ink-soft: #55607A;
+    --rule: #C5CDD6;
+    --sig: #4B3FD6;
+    --gold: #A07A1F;
+    --seal: #B42318;
+    --serif: "Spectral", "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans: "Source Sans 3", "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 15px/1.45 var(--sans);
+    font-variant-numeric: tabular-nums;
+  }
+  /* faint guilloché, the only decoration: a security-print ground under the hero */
+  .hero {
+    background:
+      repeating-radial-gradient(circle at 18% 50%, transparent 0 13px, rgba(28,39,64,.035) 13px 14px),
+      var(--paper-2);
+    border-bottom: 1px solid var(--rule);
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 28px; }
+
+  header.top {
+    display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap;
+    padding: 18px 0 6px;
+  }
+  .brand { font: 600 22px/1 var(--serif); letter-spacing: .01em; }
+  .facts { color: var(--ink-soft); display: flex; gap: 18px; flex-wrap: wrap; }
+  .facts b { color: var(--ink); font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--rule); margin-right: 6px; vertical-align: 1px; }
+  .dot.ok { background: var(--sig); }
+
+  .stage { display: grid; grid-template-columns: minmax(300px, 440px) 1fr; gap: 36px; align-items: center; padding: 8px 0 26px; }
+  svg.ceremony { width: 100%; height: auto; display: block; }
+  .narration { font: 500 clamp(26px, 3.2vw, 40px)/1.18 var(--serif); margin: 0 0 10px; max-width: 22ch; }
+  .narration.refused { color: var(--seal); }
+  .sub { color: var(--ink-soft); margin: 0; max-width: 60ch; }
+  .sub strong { color: var(--ink); font-weight: 600; }
+
+  main { display: grid; grid-template-columns: 1.25fr 1fr; gap: 0 44px; padding: 26px 0 40px; }
+  .scroll { overflow-x: auto; }
+  section { min-width: 0; }
+  h2 { font: 600 19px/1.2 var(--serif); margin: 0 0 4px; }
+  .lede { color: var(--ink-soft); margin: 0 0 12px; }
+  .full { grid-column: 1 / -1; margin-top: 30px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: right; font-weight: 600; color: var(--ink-soft); padding: 6px 8px; border-bottom: 1px solid var(--ink); white-space: nowrap; }
+  td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; padding-left: 0; }
+  td.num { font: 500 16px/1 var(--serif); }
+  tr.off td { color: var(--ink-soft); }
+  .cap { display: inline-block; width: 44px; height: 6px; background: var(--rule); vertical-align: middle; margin-right: 6px; border-radius: 3px; overflow: hidden; }
+  .cap i { display: block; height: 100%; background: var(--sig); }
+  .cap.full i { background: var(--seal); }
+  .agree { margin: 10px 0 0; }
+  .capnote { margin: 4px 0 0; color: var(--ink-soft); }
+  td small { display: block; color: var(--ink-soft); font-size: 13px; line-height: 1.2; }
+
+  .kinds td:first-child { white-space: normal; }
+  .clean { color: var(--sig); font-weight: 600; }
+  .dirty { color: var(--seal); font-weight: 600; }
+  .cipher { margin: 12px 0 0; padding: 0; list-style: none; }
+  .cipher li { display: grid; grid-template-columns: 98px 1fr; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--rule); }
+  .cipher span { color: var(--ink-soft); }
+  .cipher code { font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .log td.op { text-align: left; }
+  .log td.res { text-align: left; white-space: normal; }
+  .log tr.bad td.res { color: var(--seal); }
+  .log tr.fresh { animation: fresh 1.6s ease-out; }
+  @keyframes fresh { from { background: rgba(75,63,214,.10); } to { background: transparent; } }
+  .empty { color: var(--ink-soft); padding: 14px 0; }
+
+  /* ceremony diagram */
+  .g-node circle { fill: var(--paper-2); stroke: var(--ink); stroke-width: 1.5; }
+  .g-node.off circle { stroke: var(--rule); stroke-dasharray: 4 4; }
+  .g-node.off text { fill: var(--ink-soft); }
+  .g-node text { font: 600 15px var(--sans); fill: var(--ink); text-anchor: middle; dominant-baseline: central; }
+  .g-label { font: 400 13px var(--sans); fill: var(--ink-soft); text-anchor: middle; }
+  .mint circle { fill: var(--ink); }
+  .mint text { fill: var(--paper-2); font: 600 14px var(--serif); text-anchor: middle; dominant-baseline: central; }
+  .mint.refused circle { fill: var(--seal); }
+  .wire { stroke: var(--rule); stroke-width: 1.5; }
+  .flash { stroke-width: 3.5; stroke-linecap: round; fill: none; }
+  .flash.sign { stroke: var(--sig); }
+  .flash.verify { stroke: var(--gold); }
+  @media (prefers-reduced-motion: no-preference) {
+    .flash { stroke-dasharray: var(--len); stroke-dashoffset: var(--len); animation: draw .55s ease-out forwards, fade 2.4s 1s forwards; }
+  }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @keyframes fade { to { opacity: 0; } }
+
+  @media (max-width: 860px) {
+    .stage, main { grid-template-columns: 1fr; }
+    .stage svg { max-width: 360px; margin: 0 auto; }
+    section + section { margin-top: 30px; }
+    .full { margin-top: 30px; }
+  }
+</style>
+</head>
+<body>
+<div class="hero">
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">SplitNut</div>
+      <div class="facts">
+        <span id="f-threshold">connecting…</span>
+        <span id="f-keyset"></span>
+        <span id="f-group"></span>
+      </div>
+    </header>
+    <div class="stage">
+      <svg class="ceremony" id="ceremony" viewBox="0 0 400 360" role="img" aria-label="Guardians around the mint; lines light up for the guardians that took part in the last request"></svg>
+      <div>
+        <p class="narration" id="narration" aria-live="polite">Waiting for the first request.</p>
+        <p class="sub" id="sub">Mint or spend ecash in any Cashu wallet. Every signature needs
+          <strong id="sub-t">t</strong> guardians; the mint itself holds no keys.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <main>
+    <section>
+      <h2>Guardian ledgers</h2>
+      <p class="lede">Each guardian counts issuance it has verified and proofs it has checked, on its own. Proofs checked twice are double-spend attempts or the mint re-checking.</p>
+      <div class="scroll"><table id="ledger">
+        <thead><tr><th>Guardian</th><th>Issued</th><th>Redeemed</th><th>Outstanding</th><th>Signed this hour</th><th>Checked twice</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <p class="agree" id="agree"></p>
+      <p class="capnote" id="capnote"></p>
+    </section>
+
+    <section>
+      <h2>What the relay sees</h2>
+      <p class="lede" id="relay-lede">Everything the guardians say to each other crosses public Nostr relays.</p>
+      <div class="scroll"><table class="kinds" id="kinds">
+        <thead><tr><th>Event</th><th>Count</th><th>Bytes</th><th>Readable</th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <ul class="cipher" id="cipher"></ul>
+    </section>
+
+    <section class="full">
+      <h2>Requests from the mint</h2>
+      <div class="scroll"><table class="log" id="log">
+        <thead><tr><th>Time</th><th>Operation</th><th>Amount</th><th>Items</th><th>Guardians</th><th>Took</th><th>Result</th></tr></thead>
+        <tbody><tr><td colspan="7" class="empty">No requests yet.</td></tr></tbody>
+      </table></div>
+    </section>
+  </main>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => Number(n).toLocaleString("en-US");
+  const sat = (n) => `${fmt(n)} sat`;
+  const NS = "http://www.w3.org/2000/svg";
+  let cfg = {}, guardians = [], pos = {};
+  const MINT = { x: 200, y: 182 };
+
+  function list(nums) {
+    const s = [...nums].sort((a, b) => a - b);
+    return s.length < 2 ? `guardian ${s[0]}` : `guardians ${s.slice(0, -1).join(", ")} and ${s[s.length - 1]}`;
+  }
+
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+
+  function drawCeremony() {
+    const svg = $("ceremony");
+    svg.innerHTML = "";
+    const n = cfg.n || guardians.length || 3;
+    const R = 125;
+    for (let k = 0; k < n; k++) {
+      const a = -Math.PI / 2 + (2 * Math.PI * k) / n;
+      pos[k + 1] = { x: MINT.x + R * Math.cos(a), y: MINT.y + R * Math.sin(a) };
+    }
+    const wires = el("g", {}, svg);
+    for (const i in pos) el("line", { class: "wire", x1: pos[i].x, y1: pos[i].y, x2: MINT.x, y2: MINT.y }, wires);
+    el("g", { id: "flashes" }, svg);
+    const m = el("g", { class: "mint", id: "mint" }, svg);
+    el("circle", { cx: MINT.x, cy: MINT.y, r: 40 }, m);
+    const mt = el("text", { x: MINT.x, y: MINT.y }, m);
+    mt.textContent = "Mint";
+    for (const i in pos) {
+      const g = el("g", { class: "g-node", id: `g${i}` }, svg);
+      el("circle", { cx: pos[i].x, cy: pos[i].y, r: 24 }, g);
+      const t = el("text", { x: pos[i].x, y: pos[i].y }, g);
+      t.textContent = i;
+      const below = pos[i].y > MINT.y - 10;
+      const lab = el("text", { class: "g-label", id: `gl${i}`, x: pos[i].x, y: pos[i].y + (below ? 42 : -34) }, svg);
+      lab.textContent = `Guardian ${i}`;
+    }
+    paintGuardians();
+  }
+
+  function flash(signers, kind) {
+    const f = $("flashes");
+    if (!f) return;
+    for (const i of signers) {
+      const p = pos[i];
+      if (!p) continue;
+      const len = Math.hypot(p.x - MINT.x, p.y - MINT.y);
+      const path = el("path", { class: `flash ${kind}`, d: `M${p.x},${p.y} L${MINT.x},${MINT.y}`, style: `--len:${len}` }, f);
+      setTimeout(() => path.remove(), 3600);
+    }
+  }
+
+  function paintGuardians() {
+    for (const g of guardians) {
+      const node = $(`g${g.index}`);
+      if (node) node.classList.toggle("off", g.online === false);
+      const lab = $(`gl${g.index}`);
+      if (lab) lab.textContent = `Guardian ${g.index}${g.online === false ? ", offline" : g.rtt_ms != null ? ` (${g.rtt_ms} ms)` : ""}`;
+    }
+    const tb = $("ledger").tBodies[0];
+    tb.innerHTML = "";
+    const outs = new Set();
+    const caps = new Set();
+    for (const g of guardians) {
+      const l = g.ledger;
+      const tr = document.createElement("tr");
+      if (g.online === false) tr.className = "off";
+      if (!l) {
+        tr.innerHTML = `<td>Guardian ${g.index}</td><td colspan="5">${g.online === false ? "offline" : "no report yet"}</td>`;
+      } else {
+        if (g.online !== false) outs.add(l.outstanding);
+        const pct = l.cap_per_hour ? Math.min(100, (100 * l.signed_last_hour) / l.cap_per_hour) : 0;
+        if (l.cap_per_hour) caps.add(l.cap_per_hour);
+        const capCell = l.cap_per_hour
+          ? `<span class="cap${pct >= 100 ? " full" : ""}" title="${fmt(l.signed_last_hour)} of ${fmt(l.cap_per_hour)} sat"><i style="width:${pct}%"></i></span>${fmt(l.signed_last_hour)}`
+          : fmt(l.signed_last_hour);
+        tr.innerHTML = `<td>Guardian ${g.index}${g.online === false ? "<small>offline, last report</small>" : ""}</td>
+          <td class="num">${fmt(l.issued)}</td><td class="num">${fmt(l.redeemed)}</td>
+          <td class="num">${fmt(l.outstanding)}</td><td>${capCell}</td><td>${fmt(l.duplicates)}</td>`;
+      }
+      tb.appendChild(tr);
+    }
+    const online = guardians.filter((g) => g.online !== false && g.ledger).length;
+    const who = online === guardians.length ? "All guardians agree" : online === 1 ? "The one online guardian reports" : `The ${online} online guardians agree`;
+    $("agree").textContent = online === 0 ? "" : outs.size === 1
+      ? `${who}: ${sat([...outs][0])} of ecash is outstanding.`
+      : "The online guardians' totals differ: one of them missed events while it was offline.";
+    $("capnote").textContent = caps.size === 1
+      ? `Each guardian helps sign at most ${sat([...caps][0])} per hour, swaps and change included.`
+      : caps.size > 1 ? "Guardians have different hourly caps." : "";
+    const up = guardians.filter((g) => g.online !== false).length;
+    $("f-group").innerHTML = `<span class="dot ${up >= (cfg.t || 1) ? "ok" : ""}"></span>${up} of ${guardians.length} guardians online`;
+  }
+
+  function narrate(ev) {
+    const n = $("narration");
+    const took = `${(ev.ms / 1000).toFixed(2)} s`;
+    if (ev.ok && ev.op === "blind_sign") {
+      n.textContent = `${sat(ev.amount)} signed by ${list(ev.signers)} in ${took}.`;
+      n.classList.remove("refused");
+    } else if (ev.ok) {
+      n.textContent = `${sat(ev.amount)} of ecash checked by ${list(ev.signers)} in ${took}.`;
+      n.classList.remove("refused");
+    } else {
+      const err = clean(ev.error);
+      const m = /(\d+) of (\d+) required/.exec(err);
+      if (/hourly issuance cap/.test(err)) {
+        n.textContent = `Refused: ${sat(ev.amount)} is over the guardians' hourly issuance cap.`;
+      } else if (/offline|timed out/.test(err) && !/invalid/.test(err)) {
+        const up = guardians.filter((g) => g.online !== false).length;
+        n.textContent = `Refused: ${cfg.t} of ${cfg.n} guardians must sign, and only ${up} ${up === 1 ? "is" : "are"} online.`;
+      } else if (m) {
+        n.textContent = `Refused: only ${m[1]} of the ${m[2]} guardians needed could sign.`;
+      } else {
+        n.textContent = "Refused by the guardians.";
+      }
+      n.classList.add("refused");
+    }
+    $("mint").classList.toggle("refused", !ev.ok);
+  }
+
+  const clean = (e) => (e || "").replace(/`/g, "").trim();
+  function reason(ev) {
+    if (ev.ok) return ev.op === "blind_sign" ? "Signed" : "Valid";
+    const err = clean(ev.error);
+    const inner = /\((.*)\)$/.exec(err);
+    if (!inner) return err || "Refused";
+    // One clause per guardian, de-duplicated: "guardian 1 offline; guardians 2, 3 over the hourly cap"
+    return "Refused: " + inner[1].replace(/hourly issuance cap: [^;]*/g, "over the hourly issuance cap");
+  }
+
+  function addRow(ev, fresh) {
+    const tb = $("log").tBodies[0];
+    if (tb.querySelector(".empty")) tb.innerHTML = "";
+    const tr = document.createElement("tr");
+    if (!ev.ok) tr.classList.add("bad");
+    if (fresh) tr.classList.add("fresh");
+    const t = new Date(ev.ts).toLocaleTimeString("en-GB");
+    tr.innerHTML = `<td>${t}</td><td class="op">${ev.op === "blind_sign" ? "Sign new ecash" : "Check spent ecash"}</td>
+      <td class="num">${sat(ev.amount)}</td><td>${ev.outputs}</td><td>${ev.signers ? ev.signers.join(" + ") : "none"}</td>
+      <td>${ev.ms} ms</td><td class="res"></td>`;
+    tr.querySelector(".res").textContent = reason(ev);
+    tb.insertBefore(tr, tb.firstChild);
+    while (tb.rows.length > 40) tb.deleteRow(tb.rows.length - 1);
+  }
+
+  function onEvent(ev, live) {
+    if (ev.type === "request") {
+      addRow(ev, live);
+      if (live) {
+        narrate(ev);
+        if (ev.ok) flash(ev.signers, ev.op === "blind_sign" ? "sign" : "verify");
+      }
+    } else if (ev.type === "guardians") {
+      guardians = ev.guardians;
+      paintGuardians();
+    }
+  }
+
+  async function pollRelay() {
+    if (!cfg.relay_tap_url) {
+      $("relay-lede").textContent = "No relay wire tap configured (start the coordinator with --relay-tap-url).";
+      return;
+    }
+    try {
+      const r = await (await fetch(cfg.relay_tap_url)).json();
+      const tb = $("kinds").tBodies[0];
+      tb.innerHTML = "";
+      let hits = 0, total = 0;
+      for (const [k, s] of Object.entries(r.kinds)) {
+        hits += s.plaintext_hits; total += s.events;
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${s.name} (kind ${k})</td><td>${fmt(s.events)}</td><td>${fmt(s.bytes)}</td>
+          <td class="${s.plaintext_hits ? "dirty" : "clean"}">${s.plaintext_hits ? `${s.plaintext_hits} readable` : "none"}</td>`;
+        tb.appendChild(tr);
+      }
+      $("relay-lede").textContent = total
+        ? `${fmt(total)} events crossed the relay. ${hits ? `${hits} contained readable SplitNut data.` : "None of them contained readable SplitNut data."}`
+        : "Nothing has crossed the relay yet.";
+      const ul = $("cipher");
+      ul.innerHTML = "";
+      for (const s of r.recent.filter((e) => e.kind === 445 || e.kind === 1059).slice(0, 4)) {
+        const li = document.createElement("li");
+        li.innerHTML = `<span>${s.kind === 445 ? "Group message" : "Welcome"}</span><code></code>`;
+        li.querySelector("code").textContent = s.content;
+        ul.appendChild(li);
+      }
+    } catch (e) {
+      $("relay-lede").textContent = "The relay wire tap is not reachable.";
+    }
+  }
+
+  async function start() {
+    const st = await (await fetch("state")).json();
+    cfg = st.config;
+    guardians = st.guardians;
+    $("f-threshold").innerHTML = `<b>${cfg.t} of ${cfg.n}</b> guardians must sign`;
+    $("f-keyset").textContent = `keyset ${cfg.keyset.slice(0, 12)}…`;
+    $("sub-t").textContent = `${cfg.t} of ${cfg.n}`;
+    drawCeremony();
+    for (const ev of st.recent) onEvent(ev, false);
+    const last = st.recent.filter((e) => e.type === "request").pop();
+    if (last) narrate(last);
+    const es = new EventSource("events");
+    es.onmessage = (m) => onEvent(JSON.parse(m.data), true);
+    pollRelay();
+    setInterval(pollRelay, 2000);
+  }
+  start().catch(() => { $("narration").textContent = "Cannot reach the coordinator."; });
+})();
+</script>
+</body>
+</html>

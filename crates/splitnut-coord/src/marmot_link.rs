@@ -4,9 +4,15 @@
 //! response to the request waiting for it, keyed by (request id, guardian, kind). Responses
 //! are accepted only from roster keys, and only when the claimed `from` index matches the
 //! authenticated sender.
+//!
+//! Outgoing requests are batched: identical requests queued within a few milliseconds of each
+//! other (round 1 to every candidate, a heartbeat to every guardian, ...) go out as one group
+//! message with a `targets` list. Relays rate-limit publishers, typically to about one event
+//! per second, so this matters on public relays.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use splitnut_core::guardian::{RequestId, SignItem};
@@ -15,23 +21,73 @@ use splitnut_core::verify::Partial;
 use splitnut_core::{Idx, Scalar};
 use splitnut_marmot::{MarmotNode, NostrPublicKey};
 use splitnut_proto::*;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, warn};
 
-use crate::link::{GuardianLink, LinkError};
+use crate::link::{Announce, GuardianLink, LinkError, PingInfo};
 
 type Key = (RequestId, Idx, &'static str);
 
 pub struct Hub {
-    node: MarmotNode,
     keyset: String,
     pending: Mutex<HashMap<Key, oneshot::Sender<ResponseBody>>>,
+    out: mpsc::UnboundedSender<Outgoing>,
+}
+
+struct Outgoing {
+    to: Idx,
+    req: RequestId,
+    body: RequestBody,
+    sent: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+/// Collect requests queued at about the same time and send identical ones as one message.
+async fn batch_sender(node: MarmotNode, mut rx: mpsc::UnboundedReceiver<Outgoing>) {
+    while let Some(first) = rx.recv().await {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let mut batch = vec![first];
+        while let Ok(o) = rx.try_recv() {
+            batch.push(o);
+        }
+        let mut groups: Vec<(RequestId, String, Vec<Outgoing>)> = vec![];
+        for o in batch {
+            let key = serde_json::to_string(&o.body).unwrap_or_default();
+            match groups.iter_mut().find(|(r, k, _)| *r == o.req && *k == key) {
+                Some(g) => g.2.push(o),
+                None => groups.push((o.req, key, vec![o])),
+            }
+        }
+        for (req, _, items) in groups {
+            let mut targets: Vec<Idx> = items.iter().map(|o| o.to).collect();
+            targets.sort_unstable();
+            targets.dedup();
+            let (to, targets) = if targets.contains(&0) {
+                (0, None)
+            } else if targets.len() == 1 {
+                (targets[0], None)
+            } else {
+                (0, Some(targets))
+            };
+            let wire = Wire::Request(Request { v: VERSION, to, req, body: items[0].body.clone(), targets });
+            let node = node.clone();
+            tokio::spawn(async move {
+                let r = node.send(wire.to_json()).await.map_err(|e| e.to_string());
+                for o in items {
+                    if let Some(tx) = o.sent {
+                        let _ = tx.send(r.clone());
+                    }
+                }
+            });
+        }
+    }
 }
 
 impl Hub {
     pub fn start(node: MarmotNode, keyset: String, roster: HashMap<NostrPublicKey, Idx>) -> Arc<Self> {
-        let hub = Arc::new(Self { node, keyset, pending: Mutex::new(HashMap::new()) });
-        let mut rx = hub.node.subscribe();
+        let (out, out_rx) = mpsc::unbounded_channel();
+        let mut rx = node.subscribe();
+        tokio::spawn(batch_sender(node, out_rx));
+        let hub = Arc::new(Self { keyset, pending: Mutex::new(HashMap::new()), out });
         let h = hub.clone();
         tokio::spawn(async move {
             loop {
@@ -97,8 +153,13 @@ impl Hub {
         }
         let _cleanup = Cleanup(self, (req, to, kind));
 
-        let wire = Wire::Request(Request { v: VERSION, to, req, body });
-        self.node.send(wire.to_json()).await.map_err(|e| LinkError::Refused(to, format!("send: {e}")))?;
+        let (sent_tx, sent_rx) = oneshot::channel();
+        self.out.send(Outgoing { to, req, body, sent: Some(sent_tx) }).map_err(|_| LinkError::Transport("hub stopped".into()))?;
+        match sent_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(LinkError::Transport(e)),
+            Err(_) => return Err(LinkError::Transport("hub stopped".into())),
+        }
         let body = rx.await.map_err(|_| LinkError::Offline(to))?;
         match body {
             ResponseBody::Error { msg } => Err(LinkError::Refused(to, msg)),
@@ -107,10 +168,16 @@ impl Hub {
     }
 
     async fn notify(&self, to: Idx, req: RequestId, body: RequestBody) {
-        let wire = Wire::Request(Request { v: VERSION, to, req, body });
-        if let Err(e) = self.node.send(wire.to_json()).await {
-            debug!(guardian = to, "notify failed: {e}");
+        if self.out.send(Outgoing { to, req, body, sent: None }).is_err() {
+            debug!(guardian = to, "notify failed: hub stopped");
         }
+    }
+}
+
+#[async_trait]
+impl Announce for Hub {
+    async fn issued(&self, req: RequestId, outputs: Vec<WireIssued>) {
+        self.notify(0, req, RequestBody::Issued { keyset: self.keyset.clone(), outputs }).await;
     }
 }
 
@@ -159,6 +226,13 @@ impl GuardianLink for MarmotLink {
 
     async fn abort(&self, req: RequestId) {
         self.hub.notify(self.index, req, RequestBody::Abort).await;
+    }
+
+    async fn ping(&self, req: RequestId) -> Result<PingInfo, LinkError> {
+        match self.hub.call(self.index, req, RequestBody::Ping).await? {
+            ResponseBody::Pong { pending, ledger } => Ok(PingInfo { pending, ledger }),
+            other => Err(bad(self.index, format!("unexpected {}", other.kind()))),
+        }
     }
 
     async fn verify(&self, req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError> {

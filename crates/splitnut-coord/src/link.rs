@@ -18,6 +18,23 @@ pub enum LinkError {
     Offline(Idx),
     #[error("guardian {0} refused: {1}")]
     Refused(Idx, String),
+    /// The coordinator could not get the request out (relay rejected it, rate limit, ...).
+    /// Not the guardian's fault, so it is not marked offline for it.
+    #[error("could not reach the relays: {0}")]
+    Transport(String),
+}
+
+/// A guardian's heartbeat answer.
+#[derive(Clone, Debug, Default)]
+pub struct PingInfo {
+    pub pending: usize,
+    pub ledger: Option<splitnut_proto::WireLedger>,
+}
+
+/// Tells every guardian about finished signatures (one broadcast, no replies).
+#[async_trait]
+pub trait Announce: Send + Sync {
+    async fn issued(&self, req: RequestId, outputs: Vec<splitnut_proto::WireIssued>);
 }
 
 #[async_trait]
@@ -26,6 +43,7 @@ pub trait GuardianLink: Send + Sync {
     async fn round1(&self, req: RequestId, items: Vec<SignItem>) -> Result<Vec<Round1>, LinkError>;
     async fn round2(&self, req: RequestId, items: Vec<SignItem>, es: Vec<Scalar>) -> Result<Vec<Scalar>, LinkError>;
     async fn abort(&self, req: RequestId);
+    async fn ping(&self, req: RequestId) -> Result<PingInfo, LinkError>;
     /// Partial evaluations for proofs given as `(amount, secret)`; the guardian computes
     /// `Y = hash_to_curve(secret)` itself.
     async fn verify(&self, req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError>;
@@ -87,6 +105,11 @@ impl GuardianLink for LocalGuardian {
 
     async fn abort(&self, req: RequestId) {
         self.inner.lock().await.abort(req);
+    }
+
+    async fn ping(&self, _req: RequestId) -> Result<PingInfo, LinkError> {
+        self.gate().await?;
+        Ok(PingInfo { pending: self.inner.lock().await.pending_requests(), ledger: None })
     }
 
     async fn verify(&self, _req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError> {

@@ -8,9 +8,11 @@
 //! Guardians are reached over Marmot (`--roster`, `--relay`), or run in-process for tests
 //! (`--local-guardian`).
 
+mod dashboard;
 mod link;
 mod marmot_link;
 mod signer;
+mod status;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,7 +30,9 @@ use tracing::info;
 use crate::link::{GuardianLink, LocalGuardian};
 use crate::marmot_link::{Hub, MarmotLink};
 use splitnut_marmot::{load_or_create_keys, MarmotNode, NodeConfig, NostrPublicKey, NostrToBech32, Role, Storage};
-use crate::signer::ThresholdSigner;
+use crate::link::Announce;
+use crate::signer::{request_counter, ThresholdSigner};
+use crate::status::{spawn_heartbeats, Events, Status};
 
 #[derive(Parser)]
 #[command(about = "SplitNut coordinator: threshold remote signer for cdk-mintd")]
@@ -66,6 +70,15 @@ struct Args {
     /// Per-round guardian timeout in milliseconds
     #[arg(long, default_value_t = 5000)]
     timeout_ms: u64,
+    /// Seconds between guardian heartbeats (a guardian missing one is treated as offline)
+    #[arg(long, default_value_t = 3)]
+    heartbeat_secs: u64,
+    /// Serve the dashboard here, e.g. 127.0.0.1:8090
+    #[arg(long)]
+    dashboard: Option<SocketAddr>,
+    /// Relay wire-tap stats URL for the dashboard (splitnut-relay --http-port)
+    #[arg(long)]
+    relay_tap_url: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -92,6 +105,9 @@ async fn main() -> Result<()> {
 
     let keyset: PublicKeyset = read_json(&args.public).with_context(|| format!("reading {}", args.public.display()))?;
     let mut guardians: Vec<Arc<dyn GuardianLink>> = vec![];
+    let mut announce: Option<Arc<dyn Announce>> = None;
+    let mut marmot: Option<MarmotNode> = None;
+    let mut coord_npub = None;
     for path in &args.local_guardians {
         let file: GuardianShareFile = read_json(path).with_context(|| format!("reading {}", path.display()))?;
         anyhow::ensure!(file.keyset == keyset, "{} belongs to a different keyset", path.display());
@@ -121,7 +137,10 @@ async fn main() -> Result<()> {
         })
         .await?;
         info!(npub = %keys.public_key().to_bech32()?, relays = ?args.relays, "coordinator Marmot node started");
+        coord_npub = Some(keys.public_key().to_bech32()?);
         let hub = Hub::start(node.clone(), keyset.keyset_id.clone(), by_key);
+        announce = Some(hub.clone());
+        marmot = Some(node.clone());
         let mut indices: Vec<Idx> = roster.guardians.iter().map(|g| g.index).collect();
         indices.sort_unstable();
         for i in indices {
@@ -137,7 +156,37 @@ async fn main() -> Result<()> {
     }
     anyhow::ensure!(!guardians.is_empty(), "no guardians configured: use --roster or --local-guardian");
 
-    let signer = ThresholdSigner::new(&keyset, guardians, Duration::from_millis(args.timeout_ms))?;
+    let events = Events::new();
+    let indices: Vec<Idx> = guardians.iter().map(|g| g.index()).collect();
+    let status = Status::new(&indices, events.clone());
+    let next_req = request_counter();
+    spawn_heartbeats(guardians.clone(), status.clone(), Duration::from_secs(args.heartbeat_secs.max(1)), next_req.clone());
+    let signer = ThresholdSigner::new(
+        &keyset,
+        guardians,
+        announce,
+        status.clone(),
+        events.clone(),
+        next_req,
+        Duration::from_millis(args.timeout_ms),
+    )?;
+    if let Some(addr) = args.dashboard {
+        let dash = Arc::new(dashboard::Dash {
+            events,
+            status,
+            marmot,
+            config: serde_json::json!({
+                "t": keyset.t, "n": keyset.n, "keyset": keyset.keyset_id, "unit": keyset.unit,
+                "coordinator": coord_npub, "relays": args.relays, "relay_tap_url": args.relay_tap_url,
+                "mode": if args.roster.is_some() { "marmot" } else { "local" },
+            }),
+        });
+        tokio::spawn(async move {
+            if let Err(e) = dashboard::serve(addr, dash).await {
+                tracing::error!("dashboard: {e}");
+            }
+        });
+    }
     info!(
         keyset = %keyset.keyset_id, t = keyset.t, n = keyset.n, offline = ?args.offline,
         "SplitNut coordinator ready (holds no key material)"

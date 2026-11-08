@@ -29,9 +29,20 @@ pub enum Wire {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Request {
     pub v: u8,
+    /// Addressed guardian, or 0 for several (see `targets`).
     pub to: Idx,
     pub req: RequestId,
     pub body: RequestBody,
+    /// With `to = 0`: the guardians this is for; absent means all of them. Identical requests
+    /// to several guardians travel as one message, to stay within relay rate limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<Idx>>,
+}
+
+impl Request {
+    pub fn is_for(&self, index: Idx) -> bool {
+        self.to == index || (self.to == 0 && self.targets.as_ref().is_none_or(|t| t.contains(&index)))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,8 +56,32 @@ pub enum RequestBody {
     Abort,
     /// Partial evaluations for proof checks; the guardian computes `Y` from each secret.
     Verify { keyset: String, items: Vec<WireVerifyItem> },
-    /// Liveness check.
+    /// Liveness check; answered with status and ledger totals.
     Ping,
+    /// Broadcast (`to = 0`) after a successful signature: the finished signatures, so every
+    /// guardian can check each DLEQ and count the issuance, signer or not. No reply.
+    Issued { keyset: String, outputs: Vec<WireIssued> },
+}
+
+/// One finished blind signature, as returned to the mint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireIssued {
+    pub amount: u64,
+    pub b: String,
+    pub c: String,
+    pub e: String,
+    pub s: String,
+}
+
+/// A guardian's ledger totals, reported in heartbeat replies.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireLedger {
+    pub issued: u64,
+    pub redeemed: u64,
+    pub outstanding: i64,
+    pub signed_last_hour: u64,
+    pub cap_per_hour: u64,
+    pub duplicates: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,7 +112,11 @@ pub enum ResponseBody {
     Sign1 { parts: Vec<WireRound1> },
     Sign2 { s: Vec<String> },
     Verify { partials: Vec<WirePartial> },
-    Pong { pending: usize },
+    Pong {
+        pending: usize,
+        #[serde(default)]
+        ledger: Option<WireLedger>,
+    },
     Error { msg: String },
 }
 
@@ -102,6 +141,7 @@ impl RequestBody {
             Self::Abort => "abort",
             Self::Verify { .. } => "verify",
             Self::Ping => "ping",
+            Self::Issued { .. } => "issued",
         }
     }
 }
@@ -177,6 +217,7 @@ mod tests {
             v: VERSION,
             to: 2,
             req: 42,
+            targets: None,
             body: RequestBody::Sign1 { keyset: "01ab".into(), items: sign_items_to_wire(&items).unwrap() },
         });
         let json = req.to_json();

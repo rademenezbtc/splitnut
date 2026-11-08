@@ -151,6 +151,28 @@ pub fn blind_signature(
     Ok(sig)
 }
 
+/// Check a finished blind signature's NUT-12 DLEQ against the mint key, with the `cashu`
+/// crate's own verification. Guardians use this on announced issuance before counting it.
+pub fn verify_issued(
+    amount: Amount,
+    keyset_id: Id,
+    blinded_message: &ProjectivePoint,
+    mint_key: &ProjectivePoint,
+    (c, e, s): (ProjectivePoint, Scalar, Scalar),
+) -> bool {
+    let check = || -> Result<(), Error> {
+        let sig = BlindSignature {
+            amount,
+            keyset_id,
+            c: conv::public_key(&c)?,
+            dleq: Some(BlindSignatureDleq { e: conv::secret_key(&e)?, s: conv::secret_key(&s)? }),
+        };
+        sig.verify_dleq(conv::public_key(mint_key)?, conv::public_key(blinded_message)?)
+            .map_err(|_| Error::CombinedInvalid)
+    };
+    check().is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +236,10 @@ mod tests {
 
             // DLEQ verifies with the cashu crate's own check (inside blind_signature)
             let sig = blind_signature(Amount::from(8), keyset_id, &b_pk, &d.k_pub, out).unwrap();
+
+            // a guardian checking the announcement accepts it, and rejects a tampered one
+            assert!(verify_issued(Amount::from(8), keyset_id, &b, &d.k_pub, out));
+            assert!(!verify_issued(Amount::from(8), keyset_id, &b, &d.k_pub, (out.0 + ProjectivePoint::GENERATOR, out.1, out.2)));
 
             // and the unblinded token verifies against the full key
             let c = dhke::unblind_message(&sig.c, &r, &mint_sk.public_key()).unwrap();

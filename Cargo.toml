@@ -35,6 +35,9 @@ k256 = { version = "0.13", features = ["arithmetic", "serde"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.10"
 hex = "0.4"
+rusqlite = "0.37"
+axum = "0.8"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

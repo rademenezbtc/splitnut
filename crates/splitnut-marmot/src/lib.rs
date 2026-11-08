@@ -146,7 +146,7 @@ impl MarmotNode {
             group: None,
             incoming: incoming.clone(),
             ready: ready_tx,
-            stats: stats_tx,
+            stats: std::sync::Arc::new(stats_tx),
             key_package_ids: vec![],
         };
         tokio::spawn(actor.run(cmd_rx));
@@ -206,7 +206,7 @@ struct Actor {
     group: Option<GroupRef>,
     incoming: broadcast::Sender<Incoming>,
     ready: watch::Sender<bool>,
-    stats: watch::Sender<Stats>,
+    stats: std::sync::Arc<watch::Sender<Stats>>,
     key_package_ids: Vec<EventId>,
 }
 
@@ -228,10 +228,7 @@ impl Actor {
         loop {
             tokio::select! {
                 cmd = cmd_rx.recv() => match cmd {
-                    Some(Command::Send(content, reply)) => {
-                        let r = self.send(content).await;
-                        let _ = reply.send(r);
-                    }
+                    Some(Command::Send(content, reply)) => self.send(content, reply),
                     Some(Command::Shutdown(done)) => {
                         self.client.shutdown().await;
                         let _ = done.send(());
@@ -418,23 +415,51 @@ impl Actor {
         }
     }
 
-    async fn send(&mut self, content: String) -> Result<(), MarmotError> {
-        let group = self.group.as_ref().ok_or(MarmotError::NotReady)?;
+    /// Encrypt here (MLS state changes stay in the actor), publish in a separate task so a
+    /// retry never holds up decryption of incoming messages.
+    fn send(&mut self, content: String, reply: oneshot::Sender<Result<(), MarmotError>>) {
+        let Some(group) = self.group.as_ref() else {
+            let _ = reply.send(Err(MarmotError::NotReady));
+            return;
+        };
         let rumor = EventBuilder::new(Kind::Custom(PAYLOAD_KIND), content).build(self.keys.public_key());
-        let event = self
-            .mdk
-            .create_message(&group.mls_group_id, rumor, None)
-            .map_err(|e| MarmotError::Mdk(e.to_string()))?;
-        let out = self.client.send_event(&event).await.map_err(|e| MarmotError::Relay(e.to_string()))?;
-        if out.success.is_empty() {
-            return Err(MarmotError::Relay(format!("no relay accepted the message: {:?}", out.failed)));
-        }
-        self.stats.send_modify(|s| {
-            s.sent += 1;
-            s.bytes_out += event.content.len() as u64;
+        let event = match self.mdk.create_message(&group.mls_group_id, rumor, None) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = reply.send(Err(MarmotError::Mdk(e.to_string())));
+                return;
+            }
+        };
+        let (client, stats) = (self.client.clone(), self.stats.clone());
+        tokio::spawn(async move {
+            let r = publish_with_retry(&client, &event).await;
+            if r.is_ok() {
+                stats.send_modify(|s| {
+                    s.sent += 1;
+                    s.bytes_out += event.content.len() as u64;
+                });
+            }
+            let _ = reply.send(r);
         });
-        Ok(())
     }
+}
+
+/// Publish an already-signed event, retrying with backoff when no relay accepts it (relays
+/// rate-limit; resending the same event is idempotent).
+async fn publish_with_retry(client: &Client, event: &Event) -> Result<(), MarmotError> {
+    let mut last = String::new();
+    for delay_ms in [0u64, 300, 1000, 2500] {
+        if delay_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        match client.send_event(event).await {
+            Ok(out) if !out.success.is_empty() => return Ok(()),
+            Ok(out) => last = format!("no relay accepted the message: {:?}", out.failed),
+            Err(e) => last = e.to_string(),
+        }
+        debug!("publish failed, retrying: {last}");
+    }
+    Err(MarmotError::Relay(last))
 }
 
 /// Load a Nostr secret key from `path`, or generate one and write it there (mode 0600).

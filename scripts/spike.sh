@@ -17,7 +17,7 @@ rm -rf "$W"; mkdir -p "$W"/{signer,mint}
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
 
 "$ROOT/scripts/gen-certs.sh" "$W/certs" >/dev/null
-sed "s#@CERTS@#$W/certs#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
+sed "s#@CERTS@#$W/certs#; s#@URL@#http://127.0.0.1:8085/#; s#@LISTEN@#127.0.0.1#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
 
 "$BIN/signatory" --work-dir "$W/signer" --certs "$W/certs" --enable-logging --log-level info > "$W/signer.log" 2>&1 &
 sleep 2

@@ -4,9 +4,15 @@
 /.m2
 /.m3
 /.m4
+/.demo
+/.video
+/.video-out
+/.video-stills
 *.nsec
 certs/
 *.key
 *.sqlite
 *.db
 shares/
+__pycache__/
+*.pyc

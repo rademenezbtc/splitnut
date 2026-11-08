@@ -15,9 +15,26 @@ guardians; any *t* of them must cooperate to sign, so the operator alone cannot 
   relays see only ciphertext. Any Nostr relays work; `splitnut-relay` is a local one with a
   wire tap that counts events and flags any plaintext.
 
-Built for [Nut November 2026](https://nutnovember.org). Work in progress.
+Built for [Nut November 2026](https://nutnovember.org).
+
+## Demo
+
+**Video (2 minutes):** [video link]: a wallet mints and spends while guardians sign; one
+guardian goes offline and minting continues; a second goes offline and the mint refuses; the
+guardians' ledgers match the wallets and the relay read nothing.
 
 ![SplitNut dashboard: guardians around the mint, live ledgers, what the relay sees, and the request log](docs/dashboard.png)
+
+**Try it** (needs CDK v0.18.3's `cdk-mintd` and `cdk-cli`, see [docs/RUNNING.md](docs/RUNNING.md)):
+
+```sh
+CDK_BIN=/path/to/cdk/target/release ./scripts/demo.sh
+```
+
+One command starts a relay, three guardians, the coordinator and a keyless cdk-mintd. Mint
+from any wallet at `http://127.0.0.1:8085/`, watch http://127.0.0.1:8090/, and switch
+guardians off and on with `./scripts/guardian.sh stop 3` / `start 3`. Public relays, phone
+wallets and all settings: [docs/RUNNING.md](docs/RUNNING.md).
 
 ## Status
 
@@ -35,7 +52,10 @@ Built for [Nut November 2026](https://nutnovember.org). Work in progress.
       has verified by DLEQ, redemptions it has checked) and an hourly signing cap; heartbeats
       make quorum loss an immediate, explained refusal; a live dashboard shows each request,
       the guardians, their ledgers and what the relay sees (`scripts/m4.sh`)
-- [ ] Milestone 5: demo video, deck, submission
+- [ ] **Milestone 5, demo and submission (in progress):** one-command demo
+      (`scripts/demo.sh`), demo video (re-recordable with `scripts/video/record.py`), deck,
+      submission kit ([docs/SUBMISSION.md](docs/SUBMISSION.md)); still to do: a run on public
+      relays and a phone wallet
 
 ## Architecture
 
@@ -58,16 +78,14 @@ wallet ──HTTP──▶ cdk-mintd (unchanged, no keys)
 | `splitnut-marmot` | Marmot node: MDK + Nostr client in one actor, group setup, encrypted MLS state |
 | `splitnut-relay` | Local in-memory relay with a wire tap |
 
-## Run it
+## Tests
 
 ```sh
+cargo test --workspace
 git clone https://github.com/cashubtc/cdk && cd cdk && git checkout v0.18.3
 cargo build --release -p cdk-mintd -p cdk-cli   # needs protoc
 cd ../splitnut && CDK_BIN=../cdk/target/release ./scripts/m4.sh
 ```
-
-Open http://127.0.0.1:8090/ while it runs (or run with `KEEP=1` to leave everything up and
-mint from your own wallet against `http://127.0.0.1:8085`).
 
 `m4.sh` deals a 2-of-3 keyset, gives the coordinator and each guardian a Nostr key, starts a
 local relay, three guardian processes, the coordinator and a keyless cdk-mintd, then runs

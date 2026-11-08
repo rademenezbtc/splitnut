@@ -33,7 +33,7 @@ start_coord() { # extra args: --offline N ...
 }
 
 start_coord
-sed "s#@CERTS@#$W/certs#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
+sed "s#@CERTS@#$W/certs#; s#@URL@#http://127.0.0.1:8085/#; s#@LISTEN@#127.0.0.1#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"
 "$BIN/cdk-mintd" --work-dir "$W/mint" config init --new-mint --file "$W/mintd.toml" > /dev/null
 "$BIN/cdk-mintd" --work-dir "$W/mint" > "$W/mint.log" 2>&1 &
 for _ in $(seq 30); do curl -sf "${MINT}v1/keysets" >/dev/null && break; sleep 1; done

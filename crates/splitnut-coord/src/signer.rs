@@ -150,6 +150,19 @@ impl ThresholdSigner {
         ))
     }
 
+    /// Refusal without asking anyone: fewer than t guardians are online.
+    fn too_few_online(&self, online: usize, reasons: &Reasons) -> Error {
+        let mut reasons = reasons.clone();
+        reasons.sort_by_key(|(i, _)| *i);
+        reasons.dedup_by_key(|(i, _)| *i);
+        let why = reasons.iter().map(|(i, r)| format!("guardian {i}: {r}")).collect::<Vec<_>>().join("; ");
+        warn!(online, needed = self.t, %why, "quorum unavailable: refusing");
+        custom(format!(
+            "SplitNut quorum unavailable: only {online} of the {} required guardians online ({why})",
+            self.t
+        ))
+    }
+
     fn guardian(&self, index: Idx) -> &Arc<dyn GuardianLink> {
         self.guardians.iter().find(|g| g.index() == index).expect("known guardian")
     }
@@ -203,7 +216,7 @@ impl ThresholdSigner {
         // answered, so a dead guardian costs nothing. Everyone not chosen drops its nonces.
         let candidates = self.candidates(exclude, reasons);
         if candidates.len() < self.t {
-            return Err(self.refusal(0, reasons));
+            return Err(self.too_few_online(candidates.len(), reasons));
         }
         let mut futs: FuturesUnordered<_> = candidates
             .iter()
@@ -437,7 +450,7 @@ impl ThresholdSigner {
         let mut reasons: Reasons = vec![];
         let candidates = self.candidates(&[], &mut reasons);
         if candidates.len() < self.t {
-            return Err(self.refusal(0, &reasons));
+            return Err(self.too_few_online(candidates.len(), &reasons));
         }
         let mut futs: FuturesUnordered<_> = candidates
             .iter()
@@ -613,7 +626,7 @@ mod tests {
         s.locals[0].set_online(false);
         s.locals[1].set_online(false);
         let err = mint(&s, &[2]).await.unwrap_err();
-        assert!(err.to_string().contains("quorum unavailable: 1 of 2"), "{err}");
+        assert!(err.to_string().contains("quorum unavailable"), "{err}");
         assert!(err.to_string().contains("guardian 1: guardian 1 is offline") || err.to_string().contains("guardian 1: offline"), "{err}");
         for g in &s.locals {
             assert_eq!(g.pending().await, 0, "aborted nonces are dropped");

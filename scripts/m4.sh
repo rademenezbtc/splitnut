@@ -12,6 +12,9 @@
 #     host" (examples/evil_mintd.rs) tries over-issuing, unbalanced swaps, forged inputs and
 #     double spends against the guardians; each must be refused.
 #
+#   * the keys come from distributed key generation among the guardians (no dealer ever holds
+#     them); KEYGEN=dealer uses the trusted dealer instead.
+#
 # Needs cdk-mintd and cdk-cli built from CDK v0.18.3 plus operation context (docs/RUNNING.md).
 #
 #   CDK_BIN=/path/to/cdk/target/release ./scripts/m4.sh
@@ -21,6 +24,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${CDK_BIN:?set CDK_BIN to the directory holding cdk-mintd and cdk-cli}"
 W="${M4_DIR:-$ROOT/.m4}"
 CAP="${CAP:-5000}"
+KEYGEN="${KEYGEN:-dkg}"
 DASH=http://127.0.0.1:8090/
 MINT=http://127.0.0.1:8085/
 SN="$ROOT/target/debug"
@@ -45,9 +49,10 @@ wait_log() { # file pattern seconds
   echo "timed out waiting for '$2' in $1"; return 1
 }
 
-# ---- setup: certs, keyset, identities, roster ----
+# ---- setup: certs, identities, roster (keys below) ----
 "$ROOT/scripts/gen-certs.sh" "$W/certs" >/dev/null
-"$SN/splitnut-dealer" -t 2 -n 3 --out "$W/shares" | head -1
+mkdir -p "$W/shares"
+[ "$KEYGEN" = dealer ] && "$SN/splitnut-dealer" -t 2 -n 3 --out "$W/shares" --force | head -1
 COORD_NPUB=$("$SN/splitnut-coord" --keygen --keys "$W/keys/coord.nsec")
 {
   echo '{"guardians":['
@@ -64,13 +69,28 @@ if [ "$RELAYS" = "ws://127.0.0.1:7777" ]; then
   "$SN/splitnut-relay" --port 7777 --http-port 7778 --report-secs 2 --notes-per-minute "${RELAY_RATE:-180}" > "$W/logs/relay.log" 2>&1 &
   wait_log "$W/logs/relay.log" "relay listening" 10
 fi
+if [ "$KEYGEN" = dkg ]; then
+  echo "== distributed key generation: 3 guardians deal, nobody holds a whole key"
+  T0=$(date +%s.%N); DKG_PIDS=()
+  for i in 1 2 3; do
+    "$SN/splitnut-guardian" dkg --keys "$W/keys/g$i.nsec" --roster "$W/roster.json" --coordinator "$COORD_NPUB" \
+      "${RELAY_ARGS[@]}" --out "$W/shares/guardian-$i.json" > "$W/logs/dkg-guardian-$i.log" 2>&1 &
+    DKG_PIDS+=($!)
+  done
+  "$SN/splitnut-coord" --dkg -t 2 --roster "$W/roster.json" "${RELAY_ARGS[@]}" --keys "$W/keys/coord.nsec" \
+    --public "$W/shares/public.json" > "$W/logs/dkg-coord.log" 2>&1 || { tail -5 "$W/logs/dkg-coord.log"; echo "FAIL: key generation"; exit 1; }
+  grep "^keyset" "$W/logs/dkg-coord.log"
+  for p in "${DKG_PIDS[@]}"; do wait "$p" || { echo "FAIL: a guardian's key generation failed"; exit 1; }; done
+  for i in 1 2 3; do [ -f "$W/shares/guardian-$i.json" ] || { echo "FAIL: no share file for guardian $i"; exit 1; }; done
+  echo "   (key generation took $(printf %.1f "$(echo "$(date +%s.%N) - $T0" | bc)") s, including forming the group)"
+fi
 for i in 1 2 3; do start_guardian $i; done
 "$SN/splitnut-coord" --public "$W/shares/public.json" --roster "$W/roster.json" "${RELAY_ARGS[@]}" \
   --keys "$W/keys/coord.nsec" --tls-dir "$W/certs" --heartbeat-secs "${HEARTBEAT:-2}" \
   --dashboard 127.0.0.1:8090 --relay-tap-url http://127.0.0.1:7778/stats > "$W/logs/coord.log" 2>&1 &
 T0=$(date +%s.%N)
 wait_log "$W/logs/coord.log" "guardian group ready" 120
-for i in 1 2 3; do wait_log "$W/logs/guardian-$i.log" "joined the guardian group" 60; done
+for i in 1 2 3; do wait_log "$W/logs/guardian-$i.log" "joined the guardian group\|resumed existing group" 60; done
 echo "Marmot group formed in $(printf %.1f "$(echo "$(date +%s.%N) - $T0" | bc)") s (coordinator + 3 guardians)"
 
 sed "s#@CERTS@#$W/certs#; s#@URL@#http://127.0.0.1:8085/#; s#@LISTEN@#127.0.0.1#" "$ROOT/config/mintd.toml" > "$W/mintd.toml"

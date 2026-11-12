@@ -7,9 +7,12 @@
 //!
 //! Usage:
 //!   splitnut-guardian keygen --keys g1.nsec              # prints the npub for the roster
+//!   splitnut-guardian dkg --keys g1.nsec --roster roster.json --coordinator npub1... \
+//!       --relay ws://127.0.0.1:7777 --out guardian-1.json  # key generation, then exits
 //!   splitnut-guardian run --share guardian-1.json --keys g1.nsec \
 //!       --coordinator npub1... --relay ws://127.0.0.1:7777
 
+mod dkg;
 mod ledger;
 mod policy;
 
@@ -44,6 +47,32 @@ enum Cmd {
     Keygen {
         #[arg(long)]
         keys: PathBuf,
+    },
+    /// Join the group, take part in distributed key generation, write this guardian's share
+    /// file and exit
+    Dkg {
+        /// Nostr secret key file (created if missing)
+        #[arg(long)]
+        keys: PathBuf,
+        /// Roster (guardian index -> npub), the same file the coordinator uses. Other
+        /// guardians' keys come from here, never from the coordinator.
+        #[arg(long)]
+        roster: PathBuf,
+        /// The coordinator's npub
+        #[arg(long)]
+        coordinator: String,
+        /// Relay URL (repeat for several)
+        #[arg(long = "relay", required = true)]
+        relays: Vec<String>,
+        /// Encrypted MLS database (default: next to the keys file; reused by `run`)
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Where to write this guardian's share file
+        #[arg(long)]
+        out: PathBuf,
+        /// Give up after this many seconds
+        #[arg(long, default_value_t = 600)]
+        timeout_secs: u64,
     },
     /// Join the group and serve signing requests
     Run {
@@ -88,6 +117,9 @@ async fn main() -> Result<()> {
             let k = load_or_create_keys(&keys)?;
             println!("{}", k.public_key().to_bech32()?);
             Ok(())
+        }
+        Cmd::Dkg { keys, roster, coordinator, relays, db, out, timeout_secs } => {
+            run_dkg(keys, roster, coordinator, relays, db, out, timeout_secs).await
         }
         Cmd::Run { share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless } => {
             run(share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless).await
@@ -175,6 +207,112 @@ async fn run(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct Roster {
+    guardians: Vec<RosterEntry>,
+}
+
+#[derive(serde::Deserialize)]
+struct RosterEntry {
+    index: splitnut_core::Idx,
+    npub: String,
+}
+
+async fn run_dkg(
+    keys_path: PathBuf,
+    roster_path: PathBuf,
+    coordinator: String,
+    relays: Vec<String>,
+    db: Option<PathBuf>,
+    out: PathBuf,
+    timeout_secs: u64,
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    anyhow::ensure!(!out.exists(), "{} exists; refusing to overwrite a share file", out.display());
+    let keys = load_or_create_keys(&keys_path)?;
+    let coordinator = NostrPublicKey::parse(&coordinator).context("coordinator npub")?;
+    let roster: Roster = read_json(&roster_path).with_context(|| format!("reading {}", roster_path.display()))?;
+    let roster: BTreeMap<_, _> = roster
+        .guardians
+        .iter()
+        .map(|g| Ok((g.index, NostrPublicKey::parse(&g.npub).with_context(|| format!("guardian {} npub", g.index))?)))
+        .collect::<Result<_>>()?;
+    let index = *roster.iter().find(|(_, pk)| **pk == keys.public_key()).context("this guardian's npub is not in the roster")?.0;
+    let db = db.unwrap_or_else(|| keys_path.with_extension("mls.sqlite"));
+    let node = MarmotNode::start(NodeConfig { keys: keys.clone(), relays, storage: Storage::File(db), role: Role::Guardian { coordinator } }).await?;
+    let mut rx = node.subscribe();
+    info!(index, npub = %keys.public_key().to_bech32()?, "key generation: waiting for the coordinator");
+    let started = now();
+    let mut ceremony: Option<dkg::Ceremony> = None;
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs));
+    tokio::pin!(deadline);
+    loop {
+        let msg = tokio::select! {
+            m = rx.recv() => match m {
+                Ok(m) => m,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => anyhow::bail!("Marmot node stopped"),
+            },
+            _ = &mut deadline => anyhow::bail!("key generation timed out after {timeout_secs} s"),
+        };
+        if msg.from != coordinator || msg.created_at.as_secs() + 5 < started {
+            continue; // not from the coordinator, or history from before we started
+        }
+        let req = match Wire::from_json(&msg.content) {
+            Ok(Wire::Request(r)) if r.is_for(index) => r,
+            _ => continue,
+        };
+        let reply = |body: ResponseBody| Wire::Response(Response { v: VERSION, from: index, req: req.req, body }).to_json();
+        match &req.body {
+            RequestBody::DkgStart { session, t, n, unit, input_fee_ppk, amounts } => {
+                match dkg::start(&keys, &roster, session, *t, *n, unit, *input_fee_ppk, amounts) {
+                    Ok((c, body)) => {
+                        info!(session, t, n, keys = amounts.len(), "dealt shares");
+                        ceremony = Some(c);
+                        node.send(reply(body)).await?;
+                    }
+                    Err(msg) => {
+                        node.send(reply(ResponseBody::Error { msg: msg.clone() })).await?;
+                        anyhow::bail!("key generation refused: {msg}");
+                    }
+                }
+            }
+            RequestBody::DkgDeals { session, commitments, shares } => {
+                let Some(c) = ceremony.as_ref().filter(|c| &c.session == session) else { continue };
+                match dkg::finish(c, &keys, &roster, commitments, shares) {
+                    Ok((file, body)) => {
+                        write_secret(&out, &serde_json::to_vec_pretty(&file)?)?;
+                        info!(keyset = %file.keyset.keyset_id, out = %out.display(), "key generation done; share file written");
+                        node.send(reply(body)).await?;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await; // let the reply go out
+                        println!("{}", file.keyset.keyset_id);
+                        return Ok(());
+                    }
+                    Err(msg) => {
+                        node.send(reply(ResponseBody::Error { msg: msg.clone() })).await?;
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        anyhow::bail!("key generation failed: {msg}");
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn write_secret(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path).with_context(|| format!("writing {}", path.display()))?.write_all(bytes)?;
+    Ok(())
+}
+
 fn now() -> u64 {
     splitnut_marmot::NostrTimestamp::now().as_secs()
 }
@@ -215,6 +353,8 @@ impl State {
                 self.guardian.abort(req);
                 None
             }
+            // Key generation is a separate command (`dkg`); a running guardian ignores it.
+            RequestBody::DkgStart { .. } | RequestBody::DkgDeals { .. } => None,
             RequestBody::Sign1 { items, context, .. } => {
                 // Round 1 already reveals this guardian's share of each signature, so the
                 // operation is checked (and recorded) here, before anything is released.
@@ -307,6 +447,6 @@ fn body_keyset(body: &RequestBody) -> Option<&str> {
         | RequestBody::Sign2 { keyset, .. }
         | RequestBody::Verify { keyset, .. }
         | RequestBody::Issued { keyset, .. } => Some(keyset),
-        RequestBody::Abort | RequestBody::Ping => None,
+        RequestBody::Abort | RequestBody::Ping | RequestBody::DkgStart { .. } | RequestBody::DkgDeals { .. } => None,
     }
 }

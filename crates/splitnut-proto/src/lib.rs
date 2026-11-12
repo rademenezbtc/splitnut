@@ -81,6 +81,17 @@ pub enum RequestBody {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<WireOp>,
     },
+    /// Key generation, step 1: deal shares for one key per amount. Answered with `DkgDeal`.
+    DkgStart { session: String, t: u16, n: u16, unit: String, input_fee_ppk: u64, amounts: Vec<u64> },
+    /// Key generation, step 2: every dealer's commitments, and the shares dealt to the addressed
+    /// guardian (NIP-44 ciphertext from each other dealer), as `(dealer, …)` pairs. Answered
+    /// with `DkgDone`. (Pairs, not maps: serde cannot read integer map keys back inside an
+    /// internally tagged enum.)
+    DkgDeals {
+        session: String,
+        commitments: Vec<(Idx, Vec<Vec<String>>)>,
+        shares: Vec<(Idx, String)>,
+    },
 }
 
 /// One finished blind signature, as returned to the mint.
@@ -209,6 +220,12 @@ pub enum ResponseBody {
         #[serde(default)]
         ledger: Option<WireLedger>,
     },
+    /// Per key, commitments to the dealer's t coefficients (points); per other guardian, its
+    /// shares NIP-44-encrypted from this guardian's Nostr key to that guardian's.
+    DkgDeal { session: String, commitments: Vec<Vec<String>>, shares: Vec<(Idx, String)> },
+    /// The ceremony checked out: the resulting keyset, and a hash of the whole public keyset
+    /// so the coordinator can confirm every guardian computed the same one.
+    DkgDone { session: String, keyset_id: String, keyset_hash: String },
     Error { msg: String },
 }
 
@@ -220,6 +237,8 @@ impl ResponseBody {
             Self::Sign2 { .. } => "sign2",
             Self::Verify { .. } => "verify",
             Self::Pong { .. } => "ping",
+            Self::DkgDeal { .. } => "dkg_start",
+            Self::DkgDone { .. } => "dkg_deals",
             Self::Error { .. } => "error",
         }
     }
@@ -234,6 +253,8 @@ impl RequestBody {
             Self::Verify { .. } => "verify",
             Self::Ping => "ping",
             Self::Issued { .. } => "issued",
+            Self::DkgStart { .. } => "dkg_start",
+            Self::DkgDeals { .. } => "dkg_deals",
         }
     }
 }
@@ -288,6 +309,15 @@ pub fn scalars_from_wire(v: &[String]) -> Result<Vec<Scalar>, Error> {
     v.iter().map(|s| scalar_hex(s)).collect()
 }
 
+/// Per-key Feldman commitments to hex.
+pub fn commitments_to_wire(c: &[Vec<splitnut_core::ProjectivePoint>]) -> Result<Vec<Vec<String>>, Error> {
+    c.iter().map(|key| key.iter().map(to_hex_point).collect()).collect()
+}
+
+pub fn commitments_from_wire(c: &[Vec<String>]) -> Result<Vec<Vec<splitnut_core::ProjectivePoint>>, Error> {
+    c.iter().map(|key| key.iter().map(|p| point_hex(p)).collect()).collect()
+}
+
 pub fn partial_to_wire(p: &Partial) -> Result<WirePartial, Error> {
     Ok(WirePartial { y_i: to_hex_point(&p.y_i)?, e: to_hex_scalar(&p.e), s: to_hex_scalar(&p.s) })
 }
@@ -315,6 +345,26 @@ mod tests {
         let json = req.to_json();
         assert!(json.contains("\"type\":\"sign1\""));
         assert_eq!(Wire::from_json(&json).unwrap(), req);
+        // DKG messages carry per-guardian lists; they must survive the internally tagged enums.
+        let deals = Wire::Request(Request {
+            v: VERSION,
+            to: 1,
+            req: 7,
+            targets: None,
+            body: RequestBody::DkgDeals {
+                session: "s".into(),
+                commitments: vec![(2, vec![vec!["02ab".into()]])],
+                shares: vec![(2, "cipher".into())],
+            },
+        });
+        assert_eq!(Wire::from_json(&deals.to_json()).unwrap(), deals);
+        let deal = Wire::Response(Response {
+            v: VERSION,
+            from: 2,
+            req: 7,
+            body: ResponseBody::DkgDeal { session: "s".into(), commitments: vec![], shares: vec![(1, "c".into()), (3, "d".into())] },
+        });
+        assert_eq!(Wire::from_json(&deal.to_json()).unwrap(), deal);
         let r1 = Round1 { c: g, r1: g * Scalar::from(2u64), r2: g * Scalar::from(3u64) };
         assert_eq!(round1_from_wire(&round1_to_wire(&r1).unwrap()).unwrap(), r1);
     }

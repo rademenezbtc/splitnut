@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 pub mod conv;
+pub mod dkg;
 pub mod error;
 pub mod guardian;
 pub mod keyfile;

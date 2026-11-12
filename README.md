@@ -3,8 +3,9 @@
 **A Cashu mint whose signing keys are split across guardians, so no single party holds them.**
 
 A Cashu mint's private keys normally sit with one operator, who can sign unbacked ecash at
-will, and no wallet can tell. SplitNut splits every mint key into shares held by *n*
-guardians; any *t* of them must cooperate to produce a signature, so neither the mint server
+will, and no wallet can tell. In SplitNut every mint key exists only as shares held by *n*
+guardians, who generate it together (distributed key generation), so no one ever sees the
+whole key. Any *t* of them must cooperate to produce a signature, so neither the mint server
 nor any one guardian has a key to steal or misuse.
 
 The guardians also check *what* they sign. A small CDK change makes the mint tell the signer
@@ -76,18 +77,22 @@ wallets and all settings: [docs/RUNNING.md](docs/RUNNING.md).
       no input may be spent twice, issuance is bounded by its quotes, and the cap applies to new
       money only. `examples/evil_mintd.rs` attacks the guardians as a compromised mint host;
       `m4.sh` runs it and every attack is refused ([docs/operation-context.md](docs/operation-context.md))
+- [x] **Distributed key generation:** the guardians generate the keyset among themselves over
+      the Marmot group (joint Feldman VSS; shares NIP-44-encrypted guardian to guardian, so the
+      coordinator relaying them cannot read them). Nobody ever holds a whole mint key; the
+      trusted dealer remains only as an option (`KEYGEN=dealer`). `m4.sh` and `demo.sh` use
+      DKG ([docs/dkg.md](docs/dkg.md))
 
 ## Next
 
 The goal is for every guardian to sign only what it can justify itself, without trusting the
 mint host or the coordinator. Swaps and melts now meet that goal; what is left:
 
-1. **Distributed key generation**, replacing the trusted dealer, so no one ever holds a full key.
-2. **A public ledger.** Guardians publish signed totals to Nostr, so anyone can compare the
+1. **A public ledger.** Guardians publish signed totals to Nostr, so anyone can compare the
    ecash in circulation with the mint's reserves.
-3. **Catch-up.** A guardian that was offline replays the operations it missed and refuses to
+2. **Catch-up.** A guardian that was offline replays the operations it missed and refuses to
    sign while behind, so double-spend protection doesn't depend on every announcement arriving.
-4. **Upstream** the operation-context change to CDK.
+3. **Upstream** the operation-context change to CDK.
 
 ## Architecture
 
@@ -102,11 +107,11 @@ wallet ──HTTP──▶ cdk-mintd (no keys; passes operation context)
 
 | Crate | Role |
 |-------|------|
-| `splitnut-core` | Share maths, Lagrange combination, DLEQ round logic |
+| `splitnut-core` | Share maths, Lagrange combination, DLEQ round logic, distributed key generation |
 | `splitnut-proto` | Messages on the Marmot channel |
-| `splitnut-dealer` | One-off key generation and t-of-n splitting |
-| `splitnut-guardian` | Guardian daemon |
-| `splitnut-coord` | Remote signer for cdk-mintd plus Marmot fan-out and dashboard |
+| `splitnut-dealer` | Optional trusted-dealer key generation (tests, fallback) |
+| `splitnut-guardian` | Guardian daemon: `dkg` takes part in key generation, `run` signs by the rules |
+| `splitnut-coord` | Remote signer for cdk-mintd plus Marmot fan-out and dashboard; `--dkg` runs key generation |
 | `splitnut-marmot` | Marmot node: MDK + Nostr client in one actor, group setup, encrypted MLS state |
 | `splitnut-relay` | Local in-memory relay with a wire tap |
 
@@ -134,7 +139,8 @@ about 0.2 s.
 
 ## How the signing works
 
-Each mint key `k` (one per amount) is split t-of-n by the dealer. For a blinded message `B'`
+Each mint key `k` (one per amount) is shared t-of-n among the guardians by distributed key
+generation, so `k` itself is never computed anywhere. For a blinded message `B'`
 the coordinator runs two rounds with t guardians: each returns `k_i·B'` plus nonce
 commitments `r_i·G` and `r_i·B'`, then `s_i = r_i + e·k_i` for the NUT-12 challenge `e`.
 Lagrange-combined, this is exactly the signature and DLEQ proof a single-key mint would
@@ -146,8 +152,8 @@ Proof checks (`verify_proofs`) work the same way in one round. Details are in
 ## Threat model
 
 SplitNut guarantees two things: **no single party, the mint operator included, holds a mint
-key, and a valid signature needs t guardians** (provided the dealer's output was deleted; see
-below); and **swaps and melts cannot create ecash**, because every guardian checks them itself.
+key, nor ever did (the guardians generate the keys together), and a valid signature needs t
+guardians**; and **swaps and melts cannot create ecash**, because every guardian checks them itself.
 New ecash can only come from a mint quote, which guardians cap and count but cannot verify.
 
 **Protected**
@@ -204,9 +210,12 @@ New ecash can only come from a mint quote, which guardians cap and count but can
   can let the wrong person spend a locked token. That moves ecash; it does not create any.
 * *Custody.* The operator still holds the Lightning funds. SplitNut targets unbacked issuance
   (inflation), not theft of the reserves.
-* *Trusted dealer.* Whoever runs the dealer saw every full key once and, with a copy, could sign
-  without any guardian. Delete its output after handing out the share files; distributed key
-  generation is the planned replacement.
+* *Key generation.* Distributed key generation (joint Feldman VSS) needs all n guardians online
+  for the ceremony, aborts rather than repairs if any share is invalid (naming the dealer), and
+  lets a guardian that colludes with the coordinator bias the public key's distribution, but
+  not learn the key. Guardians take each other's Nostr keys from a roster file they hold
+  themselves, so the coordinator cannot substitute its own. The optional trusted dealer
+  (`KEYGEN=dealer`) sees every full key once; use it only for tests.
 * *Collusion.* t guardians together can do anything a single operator could. Choose t and n
   accordingly.
 * *Liveness.* With fewer than t guardians online the mint stops issuing and redeeming. That is

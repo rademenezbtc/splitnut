@@ -7,8 +7,12 @@
 //!
 //! Guardians are reached over Marmot (`--roster`, `--relay`), or run in-process for tests
 //! (`--local-guardian`).
+//!
+//! `--dkg` runs distributed key generation with the guardians instead (they run
+//! `splitnut-guardian dkg`), writes the public keyset to `--public` and exits.
 
 mod dashboard;
+mod dkg;
 mod link;
 mod marmot_link;
 mod signer;
@@ -79,6 +83,22 @@ struct Args {
     /// Relay wire-tap stats URL for the dashboard (splitnut-relay --http-port)
     #[arg(long)]
     relay_tap_url: Option<String>,
+    /// Run distributed key generation with the roster's guardians, write the public keyset to
+    /// `--public`, and exit
+    #[arg(long)]
+    dkg: bool,
+    /// Key generation: threshold
+    #[arg(short, long, default_value_t = 2)]
+    t: u16,
+    /// Key generation: unit (must match cdk-mintd's)
+    #[arg(long, default_value = "sat")]
+    unit: String,
+    /// Key generation: input fee in ppk (must match cdk-mintd's)
+    #[arg(long, default_value_t = 0)]
+    input_fee_ppk: u64,
+    /// Key generation: amounts 2^0 .. 2^(max_order-1); cdk-mintd's default is 32
+    #[arg(long, default_value_t = 32)]
+    max_order: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -101,6 +121,10 @@ async fn main() -> Result<()> {
     if args.keygen {
         println!("{}", load_or_create_keys(&args.keys)?.public_key().to_bech32()?);
         return Ok(());
+    }
+
+    if args.dkg {
+        return run_dkg(&args).await;
     }
 
     let keyset: PublicKeyset = read_json(&args.public).with_context(|| format!("reading {}", args.public.display()))?;
@@ -192,5 +216,57 @@ async fn main() -> Result<()> {
         "SplitNut coordinator ready (holds no key material)"
     );
     cdk_signatory::start_grpc_server(Arc::new(signer), args.listen, args.tls_dir).await?;
+    Ok(())
+}
+
+/// Key generation mode: form (or resume) the group, run the ceremony, write public.json.
+async fn run_dkg(args: &Args) -> Result<()> {
+    use std::str::FromStr;
+    let roster_path = args.roster.as_ref().context("--dkg needs --roster")?;
+    anyhow::ensure!(!args.relays.is_empty(), "--dkg needs at least one --relay");
+    anyhow::ensure!(!args.public.exists(), "{} exists; refusing to overwrite a keyset", args.public.display());
+    let roster: Roster = read_json(roster_path).with_context(|| format!("reading {}", roster_path.display()))?;
+    let n = roster.guardians.len() as u16;
+    anyhow::ensure!(args.t >= 1 && args.t <= n, "need 1 <= t <= n (n = {n} guardians in the roster)");
+    let mut by_key = HashMap::new();
+    for g in &roster.guardians {
+        let pk = NostrPublicKey::parse(&g.npub).with_context(|| format!("guardian {} npub", g.index))?;
+        anyhow::ensure!(by_key.insert(pk, g.index).is_none(), "duplicate npub in roster");
+    }
+    let mut indices: Vec<Idx> = roster.guardians.iter().map(|g| g.index).collect();
+    indices.sort_unstable();
+    anyhow::ensure!(indices.iter().copied().eq(1..=n), "roster indices must be 1..={n}");
+
+    let keys = load_or_create_keys(&args.keys)?;
+    let node = MarmotNode::start(NodeConfig {
+        keys: keys.clone(),
+        relays: args.relays.clone(),
+        storage: Storage::File(args.db.clone().unwrap_or_else(|| args.keys.with_extension("mls.sqlite"))),
+        role: Role::Coordinator {
+            guardians: roster.guardians.iter().map(|g| NostrPublicKey::parse(&g.npub)).collect::<Result<_, _>>()?,
+        },
+    })
+    .await?;
+    info!(npub = %keys.public_key().to_bech32()?, "key generation: waiting for the guardian group");
+    anyhow::ensure!(node.wait_ready(Duration::from_secs(600)).await, "guardian group not ready after 10 minutes");
+    info!("guardian group ready");
+    let hub = Hub::start(node.clone(), String::new(), by_key);
+    let params = dkg::Params {
+        t: args.t,
+        n,
+        unit: cdk_common::CurrencyUnit::from_str(&args.unit).context("unknown unit")?,
+        input_fee_ppk: args.input_fee_ppk,
+        amounts: splitnut_core::keyfile::default_amounts(args.max_order),
+    };
+    let req = request_counter().load(std::sync::atomic::Ordering::Relaxed);
+    let keyset = dkg::run(hub, &indices, &params, req, Duration::from_secs(120)).await?;
+    if let Some(dir) = args.public.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&args.public, serde_json::to_vec_pretty(&keyset)?)?;
+    info!(keyset = %keyset.keyset_id, public = %args.public.display(), "key generation done");
+    println!("keyset {} ({} amounts, unit {}, fee {} ppk), {}-of-{}, by distributed key generation",
+        keyset.keyset_id, keyset.keys.len(), keyset.unit, keyset.input_fee_ppk, keyset.t, keyset.n);
+    tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }

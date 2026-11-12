@@ -6,7 +6,7 @@ Replace the bracketed placeholders before submitting.
 ## Name and one-liner
 
 **SplitNut**: a Cashu mint whose signing key is split across guardians, so no single
-operator can create ecash on their own.
+party holds it or can sign alone.
 
 ## Links
 
@@ -24,7 +24,9 @@ no keys itself; the guardians produce threshold signatures with standard NUT-12 
 so any Cashu wallet works unchanged. Each guardian enforces an hourly cap and keeps its own
 ledger of DLEQ-verified issuance, and a live dashboard shows every request, the guardians'
 ledgers and what the relay saw (ciphertext only). Kill one guardian and the mint keeps
-working; kill two and it refuses, so the operator alone cannot print money.
+working; kill two and it refuses, because no single party can sign. In v1 the guardians
+still sign what the mint host asks for, within the cap; giving them the context to refuse
+unbacked requests is the next step.
 
 ## Notes (existing work vs. November)
 
@@ -57,14 +59,14 @@ Built in November:
 
 ## Post for Nostr and X
 
-> Built SplitNut for #NutNovember: a Cashu mint where no single operator can print ecash.
+> Built SplitNut for #NutNovember: a Cashu mint where no single party holds the keys.
 > Every mint key is split 2-of-3 across guardians talking over Marmot. Stock cdk-mintd, no
 > keys on the server, and any Cashu wallet works unchanged. Kill one guardian: still works.
 > Kill two: it refuses. [video link] https://github.com/rademenezbtc/splitnut
 
 Shorter:
 
-> A Cashu mint the operator can't print from: keys split 2-of-3 across guardians over Marmot,
+> A Cashu mint with no key on the server: keys split 2-of-3 across guardians over Marmot,
 > wallets unchanged. #NutNovember [video link]
 
 ## Checklist (from the brief)

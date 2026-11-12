@@ -117,11 +117,13 @@ impl Hub {
                 }
                 // An error answers whatever this guardian was asked for this request.
                 let kinds: &[&'static str] = match &resp.body {
-                    ResponseBody::Error { .. } => &["sign1", "sign2", "verify", "ping"],
+                    ResponseBody::Error { .. } => &["sign1", "sign2", "verify", "ping", "dkg_start", "dkg_deals"],
                     b => match b.kind() {
                         "sign1" => &["sign1"],
                         "sign2" => &["sign2"],
                         "verify" => &["verify"],
+                        "dkg_start" => &["dkg_start"],
+                        "dkg_deals" => &["dkg_deals"],
                         _ => &["ping"],
                     },
                 };
@@ -140,7 +142,7 @@ impl Hub {
         hub
     }
 
-    async fn call(&self, to: Idx, req: RequestId, body: RequestBody) -> Result<ResponseBody, LinkError> {
+    pub async fn call(&self, to: Idx, req: RequestId, body: RequestBody) -> Result<ResponseBody, LinkError> {
         let kind = body.kind();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert((req, to, kind), tx);

@@ -55,7 +55,9 @@ Built in November:
 * Guardians check what they sign: a backwards-compatible CDK commit passes operation context
   to the signer; an "evil mintd" run shows every attack refused.
 * Honest limits: a guardian cannot prove a mint quote was paid (the mint made the invoice), so
-  issuance is capped and counted, not verified; trusted dealer; custody unchanged.
+  issuance is capped and counted, not verified; custody unchanged.
+* No trusted dealer: the guardians generate the keys themselves (DKG over Marmot), so no one
+  ever held a whole mint key.
 * [Check before using] A remote-signer NUT is being drafted (cashubtc/nuts#250, "Mint Remote
   signer standard" in the Cashu dev-call notes). SplitNut is a working threshold
   implementation of such a signer, which could inform that standard.

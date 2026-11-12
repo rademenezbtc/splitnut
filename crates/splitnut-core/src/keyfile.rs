@@ -1,5 +1,5 @@
-//! On-disk formats written by the dealer: one public keyset file for the coordinator and one
-//! share file per guardian. Points are 33-byte compressed hex, scalars 32-byte hex.
+//! On-disk formats written by the dealer or a DKG ceremony: one public keyset file for the
+//! coordinator and one share file per guardian. Points are 33-byte compressed hex, scalars 32-byte hex.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -119,7 +119,6 @@ pub fn deal(
         return Err(Error::InvalidThreshold { t, n });
     }
     let mut keys = BTreeMap::new();
-    let mut cashu_keys = BTreeMap::new();
     let mut public_shares: BTreeMap<Idx, BTreeMap<u64, String>> = BTreeMap::new();
     let mut secret_shares: BTreeMap<Idx, BTreeMap<u64, String>> = BTreeMap::new();
 
@@ -133,28 +132,19 @@ pub fn deal(
             return Err(Error::CombinedInvalid);
         }
         keys.insert(amount, to_hex_point(&k_pub)?);
-        cashu_keys.insert(cashu::Amount::from(amount), conv::public_key(&k_pub)?);
         for (i, s) in &shares {
             public_shares.entry(*i).or_default().insert(amount, to_hex_point(&(ProjectivePoint::GENERATOR * s))?);
             secret_shares.entry(*i).or_default().insert(amount, to_hex_scalar(s));
         }
     }
 
-    let keyset_id = cashu::nuts::nut02::Id::v2_from_data(&cashu::nuts::nut01::Keys::new(cashu_keys), unit, input_fee_ppk, None);
-    // Signer identity: a fresh key whose secret is discarded; mintd only checks it stays the same.
-    let identity = ProjectivePoint::GENERATOR * Scalar::random(&mut *rng);
-
-    let keyset = PublicKeyset {
-        format: FORMAT_VERSION,
-        t,
-        n,
-        unit: unit.to_string(),
-        input_fee_ppk,
-        keyset_id: keyset_id.to_string(),
-        identity_pubkey: to_hex_point(&identity)?,
-        keys,
-        public_shares,
-    };
+    let amounts: Vec<u64> = keys.keys().copied().collect();
+    let key_points = amounts.iter().map(|a| point_hex(&keys[a])).collect::<Result<Vec<_>, _>>()?;
+    let public_points = public_shares
+        .iter()
+        .map(|(i, m)| Ok((*i, amounts.iter().map(|a| point_hex(&m[a])).collect::<Result<Vec<_>, Error>>()?)))
+        .collect::<Result<BTreeMap<_, _>, Error>>()?;
+    let keyset = assemble(t, n, unit, input_fee_ppk, &amounts, &key_points, &public_points)?;
     let files = secret_shares
         .into_iter()
         .map(|(index, shares)| GuardianShareFile { format: FORMAT_VERSION, index, shares, keyset: keyset.clone() })
@@ -165,10 +155,104 @@ pub fn deal(
     Ok((keyset, files))
 }
 
+/// The signer identity cdk-mintd pins (its NUT-06 mint pubkey): a point derived from the
+/// keyset id by hash-to-curve, so every guardian and the coordinator get the same one and
+/// nobody knows its discrete log.
+pub fn identity_for(keyset_id: &str) -> Result<ProjectivePoint, Error> {
+    conv::hash_to_curve(format!("splitnut-identity:{keyset_id}").as_bytes())
+}
+
+/// Build the public keyset from mint keys and public shares (one entry per amount, in
+/// `amounts` order), as the dealer or a DKG ceremony produced them.
+pub fn assemble(
+    t: u16,
+    n: u16,
+    unit: &cashu::nuts::nut00::CurrencyUnit,
+    input_fee_ppk: u64,
+    amounts: &[u64],
+    keys: &[ProjectivePoint],
+    public_shares: &BTreeMap<Idx, Vec<ProjectivePoint>>,
+) -> Result<PublicKeyset, Error> {
+    if keys.len() != amounts.len() || public_shares.len() != n as usize {
+        return Err(Error::InvalidThreshold { t, n });
+    }
+    let mut cashu_keys = BTreeMap::new();
+    let mut key_hex = BTreeMap::new();
+    for (a, k) in amounts.iter().zip(keys) {
+        cashu_keys.insert(cashu::Amount::from(*a), conv::public_key(k)?);
+        key_hex.insert(*a, to_hex_point(k)?);
+    }
+    let mut shares_hex: BTreeMap<Idx, BTreeMap<u64, String>> = BTreeMap::new();
+    for (i, v) in public_shares {
+        if v.len() != amounts.len() {
+            return Err(Error::MissingShare(*i));
+        }
+        for (a, p) in amounts.iter().zip(v) {
+            shares_hex.entry(*i).or_default().insert(*a, to_hex_point(p)?);
+        }
+    }
+    let keyset_id =
+        cashu::nuts::nut02::Id::v2_from_data(&cashu::nuts::nut01::Keys::new(cashu_keys), unit, input_fee_ppk, None).to_string();
+    let identity = identity_for(&keyset_id)?;
+    Ok(PublicKeyset {
+        format: FORMAT_VERSION,
+        t,
+        n,
+        unit: unit.to_string(),
+        input_fee_ppk,
+        keyset_id,
+        identity_pubkey: to_hex_point(&identity)?,
+        keys: key_hex,
+        public_shares: shares_hex,
+    })
+}
+
+/// A guardian's share file from a DKG outcome.
+pub fn share_file_from_dkg(
+    index: Idx,
+    t: u16,
+    n: u16,
+    unit: &cashu::nuts::nut00::CurrencyUnit,
+    input_fee_ppk: u64,
+    amounts: &[u64],
+    out: &crate::dkg::Outcome,
+) -> Result<GuardianShareFile, Error> {
+    let keyset = assemble(t, n, unit, input_fee_ppk, amounts, &out.keys, &out.public_shares)?;
+    let shares = amounts.iter().zip(&out.shares).map(|(a, s)| (*a, to_hex_scalar(s))).collect();
+    let file = GuardianShareFile { format: FORMAT_VERSION, index, shares, keyset };
+    file.parse_shares()?;
+    Ok(file)
+}
+
+/// The amounts cdk-mintd configures by default: `2^0 .. 2^(max_order-1)`.
+pub fn default_amounts(max_order: u32) -> Vec<u64> {
+    (0..max_order).map(|i| 1u64 << i).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand_core::OsRng;
+
+    #[test]
+    fn dkg_share_files_sign_like_dealt_ones() {
+        use crate::dkg;
+        let unit = cashu::nuts::nut00::CurrencyUnit::Sat;
+        let amounts = default_amounts(4);
+        let deals: Vec<_> = (1..=3).map(|_| dkg::deal(2, 3, amounts.len(), &mut OsRng).unwrap()).collect();
+        let commitments: BTreeMap<Idx, _> = deals.iter().enumerate().map(|(d, x)| (d as Idx + 1, x.commitments.clone())).collect();
+        let files: Vec<GuardianShareFile> = (1..=3)
+            .map(|j| {
+                let received = deals.iter().enumerate().map(|(d, x)| (d as Idx + 1, x.shares[&j].clone())).collect();
+                let out = dkg::finish(j, 2, 3, amounts.len(), &commitments, &received).unwrap();
+                share_file_from_dkg(j, 2, 3, &unit, 0, &amounts, &out).unwrap()
+            })
+            .collect();
+        // same public keyset everywhere, a V2 id, and a derived identity
+        assert!(files.iter().all(|f| f.keyset == files[0].keyset));
+        assert!(files[0].keyset.keyset_id.starts_with("01"));
+        assert_eq!(files[0].keyset.identity_pubkey, to_hex_point(&identity_for(&files[0].keyset.keyset_id).unwrap()).unwrap());
+    }
 
     #[test]
     fn deal_roundtrip() {

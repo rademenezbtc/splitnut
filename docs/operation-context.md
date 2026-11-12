@@ -99,4 +99,4 @@ swap a forged input, double-spend, or swap melted proofs are all refused.
   users; it does not create any.
 * **Failed melts.** Proofs from a melt that fails can afterwards only be retried for the same
   quote, because guardians have no signed notice that the melt failed.
-* **Trusted dealer** and **custody of reserves**, as before.
+* **Custody of reserves**, as before. (The trusted dealer is gone: see `docs/dkg.md`.)

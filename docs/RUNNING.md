@@ -75,6 +75,23 @@ The mint has to be reachable from the phone.
 it. Wallets that check DLEQ proofs (cdk-cli, cashu-ts, so cashu.me) verify every threshold
 signature against the mint's published keys, exactly as for a single-key mint.
 
+## Keys
+
+The guardians generate the keyset themselves (distributed key generation, `docs/dkg.md`);
+`demo.sh` and `m4.sh` do this on a fresh start. By hand, with a relay up and a roster file
+(index → npub) that every guardian and the coordinator hold:
+
+```sh
+splitnut-guardian dkg --keys g1.nsec --roster roster.json --coordinator npub1... \
+    --relay ws://127.0.0.1:7777 --out guardian-1.json          # on each guardian
+splitnut-coord --dkg -t 2 --roster roster.json --keys coord.nsec \
+    --relay ws://127.0.0.1:7777 --public shares/public.json   # once, on the coordinator
+```
+
+Each guardian writes its own share file and exits; the coordinator writes `public.json` once
+every guardian has confirmed the same keyset. Then start them normally (`run`); they resume
+the same Marmot group. `KEYGEN=dealer` makes the scripts use the trusted dealer instead.
+
 ## The tests
 
 | Script | What it shows |

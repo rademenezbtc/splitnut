@@ -12,7 +12,10 @@
 //! * the coordinator waits until every guardian's key package is on the relays, creates the
 //!   group (itself the only admin) and gift-wraps one welcome per guardian.
 //!
-//! MLS state lives in SQLite, so a restarted node resumes its group without a new setup.
+//! MLS state lives in SQLite, so a restarted node resumes its group without a new setup. On
+//! resume it first replays the group's history from the relays, oldest first (MLS tolerates
+//! only a little reordering per sender), and only then reports itself *synced*: a guardian
+//! uses that to refuse signing until it has seen everything it missed while offline.
 //! MDK binds every application message to the sender's MLS credential, so [`Incoming::from`]
 //! is authenticated; callers map it to a guardian index.
 
@@ -91,6 +94,7 @@ pub struct NodeConfig {
 
 enum Command {
     Send(String, oneshot::Sender<Result<(), MarmotError>>),
+    Publish(EventBuilder, oneshot::Sender<Result<EventId, MarmotError>>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -99,7 +103,10 @@ enum Command {
 pub struct MarmotNode {
     cmd: mpsc::Sender<Command>,
     incoming: broadcast::Sender<Incoming>,
+    /// Receiver created before the actor starts, so the first subscriber sees the replay.
+    first: std::sync::Arc<std::sync::Mutex<Option<broadcast::Receiver<Incoming>>>>,
     ready: watch::Receiver<bool>,
+    synced: watch::Receiver<bool>,
     stats: watch::Receiver<Stats>,
     pubkey: PublicKey,
 }
@@ -132,8 +139,9 @@ impl MarmotNode {
 
         let relays = cfg.relays.iter().map(|r| RelayUrl::parse(r)).collect::<Result<Vec<_>, _>>()?;
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
-        let (incoming, _) = broadcast::channel(1024);
+        let (incoming, first) = broadcast::channel(8192);
         let (ready_tx, ready) = watch::channel(false);
+        let (synced_tx, synced) = watch::channel(false);
         let (stats_tx, stats) = watch::channel(Stats::default());
         let pubkey = cfg.keys.public_key();
 
@@ -146,11 +154,20 @@ impl MarmotNode {
             group: None,
             incoming: incoming.clone(),
             ready: ready_tx,
+            synced: synced_tx,
             stats: std::sync::Arc::new(stats_tx),
             key_package_ids: vec![],
         };
         tokio::spawn(actor.run(cmd_rx));
-        Ok(Self { cmd: cmd_tx, incoming, ready, stats, pubkey })
+        Ok(Self {
+            cmd: cmd_tx,
+            incoming,
+            first: std::sync::Arc::new(std::sync::Mutex::new(Some(first))),
+            ready,
+            synced,
+            stats,
+            pubkey,
+        })
     }
 
     pub fn pubkey(&self) -> PublicKey {
@@ -165,6 +182,19 @@ impl MarmotNode {
 
     pub fn is_ready(&self) -> bool {
         *self.ready.borrow()
+    }
+
+    /// In the group and caught up: the history missed while offline has been replayed.
+    pub fn is_synced(&self) -> bool {
+        *self.synced.borrow()
+    }
+
+    /// Sign and publish an ordinary (public, unencrypted) Nostr event with this node's key,
+    /// for example a guardian's ledger totals.
+    pub async fn publish(&self, builder: EventBuilder) -> Result<EventId, MarmotError> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd.send(Command::Publish(builder, tx)).await.map_err(|_| MarmotError::Stopped)?;
+        rx.await.map_err(|_| MarmotError::Stopped)?
     }
 
     /// Encrypt `content` to the group and publish it.
@@ -182,9 +212,13 @@ impl MarmotNode {
         }
     }
 
-    /// Decrypted messages from other members.
+    /// Decrypted messages from other members. The first call gets every message since the
+    /// node started (including the replay); later calls get messages from then on.
     pub fn subscribe(&self) -> broadcast::Receiver<Incoming> {
-        self.incoming.subscribe()
+        match self.first.lock().expect("lock").take() {
+            Some(rx) => rx,
+            None => self.incoming.subscribe(),
+        }
     }
 
     pub fn stats(&self) -> Stats {
@@ -206,6 +240,7 @@ struct Actor {
     group: Option<GroupRef>,
     incoming: broadcast::Sender<Incoming>,
     ready: watch::Sender<bool>,
+    synced: watch::Sender<bool>,
     stats: std::sync::Arc<watch::Sender<Stats>>,
     key_package_ids: Vec<EventId>,
 }
@@ -217,7 +252,7 @@ impl Actor {
         match self.mdk.get_groups() {
             Ok(groups) if !groups.is_empty() => {
                 let g = &groups[0];
-                self.enter_group(g.mls_group_id.clone(), hex::encode(g.nostr_group_id)).await;
+                self.resume_group(g.mls_group_id.clone(), hex::encode(g.nostr_group_id)).await;
                 info!(group = %self.group.as_ref().unwrap().nostr_group_id, "resumed existing group");
             }
             Ok(_) => self.begin_setup().await,
@@ -229,6 +264,17 @@ impl Actor {
             tokio::select! {
                 cmd = cmd_rx.recv() => match cmd {
                     Some(Command::Send(content, reply)) => self.send(content, reply),
+                    Some(Command::Publish(builder, reply)) => {
+                        let client = self.client.clone();
+                        tokio::spawn(async move {
+                            let r = match client.send_event_builder(builder).await {
+                                Ok(out) if !out.success.is_empty() => Ok(*out.id()),
+                                Ok(out) => Err(MarmotError::Relay(format!("no relay accepted the event: {:?}", out.failed))),
+                                Err(e) => Err(MarmotError::Relay(e.to_string())),
+                            };
+                            let _ = reply.send(r);
+                        });
+                    }
                     Some(Command::Shutdown(done)) => {
                         self.client.shutdown().await;
                         let _ = done.send(());
@@ -348,21 +394,54 @@ impl Actor {
         info!(members = guardians.len() + 1, "group created");
     }
 
+    fn group_filter(nostr_group_id: &str) -> Filter {
+        Filter::new().kind(Kind::MlsGroupMessage).custom_tag(SingleLetterTag::lowercase(Alphabet::H), nostr_group_id.to_string())
+    }
+
+    /// A new member: nothing before the welcome can be decrypted, so it is synced at once.
     async fn enter_group(&mut self, mls_group_id: GroupId, nostr_group_id: String) {
-        let f = Filter::new()
-            .kind(Kind::MlsGroupMessage)
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), nostr_group_id.clone());
-        if let Err(e) = self.client.subscribe(f, None).await {
+        if let Err(e) = self.client.subscribe(Self::group_filter(&nostr_group_id), None).await {
             warn!("subscribing to group messages: {e}");
         }
         self.group = Some(GroupRef { mls_group_id, nostr_group_id });
         let _ = self.ready.send(true);
+        let _ = self.synced.send(true);
+    }
+
+    /// A restarted member: replay the group's stored history oldest first (already-processed
+    /// messages are rejected by MDK and skipped), then follow live messages.
+    async fn resume_group(&mut self, mls_group_id: GroupId, nostr_group_id: String) {
+        self.group = Some(GroupRef { mls_group_id, nostr_group_id: nostr_group_id.clone() });
+        let _ = self.ready.send(true);
+        let started = Timestamp::now();
+        let mut replayed = 0usize;
+        match self.client.fetch_events(Self::group_filter(&nostr_group_id), Duration::from_secs(10)).await {
+            Ok(events) => {
+                let mut events: Vec<Event> = events.into_iter().collect();
+                events.sort_by_key(|e| (e.created_at, e.id));
+                for e in &events {
+                    if self.on_group_message(e) {
+                        replayed += 1;
+                    }
+                }
+                info!(stored = events.len(), new = replayed, "replayed group history");
+            }
+            Err(e) => warn!("fetching group history: {e}; not synced"),
+        }
+        // Overlap a little: an event seen twice is harmless (MDK rejects the repeat).
+        let live = Self::group_filter(&nostr_group_id).since(Timestamp::from(started.as_secs().saturating_sub(5)));
+        if let Err(e) = self.client.subscribe(live, None).await {
+            warn!("subscribing to group messages: {e}");
+        }
+        let _ = self.synced.send(true);
     }
 
     async fn on_event(&mut self, event: &Event) {
         match event.kind {
             Kind::GiftWrap => self.on_gift_wrap(event).await,
-            Kind::MlsGroupMessage => self.on_group_message(event),
+            Kind::MlsGroupMessage => {
+                self.on_group_message(event);
+            }
             _ => {}
         }
     }
@@ -398,20 +477,28 @@ impl Actor {
         info!(group = %nostr_group_id, "joined the guardian group");
     }
 
-    fn on_group_message(&mut self, event: &Event) {
+    /// Process one group event; true if it produced a new application message.
+    fn on_group_message(&mut self, event: &Event) -> bool {
         match self.mdk.process_message(event) {
             Ok(MessageProcessingResult::ApplicationMessage(m)) => {
                 if m.pubkey == self.keys.public_key() || m.kind != Kind::Custom(PAYLOAD_KIND) {
-                    return;
+                    return false;
                 }
                 self.stats.send_modify(|s| {
                     s.received += 1;
                     s.bytes_in += event.content.len() as u64;
                 });
                 let _ = self.incoming.send(Incoming { from: m.pubkey, content: m.content, created_at: m.created_at });
+                true
             }
-            Ok(other) => debug!("group event: {other:?}"),
-            Err(e) => debug!("group message not processed: {e}"),
+            Ok(other) => {
+                debug!("group event: {other:?}");
+                false
+            }
+            Err(e) => {
+                debug!("group message not processed: {e}");
+                false
+            }
         }
     }
 
@@ -485,4 +572,7 @@ pub fn load_or_create_keys(path: &std::path::Path) -> anyhow::Result<Keys> {
     Ok(keys)
 }
 
-pub use nostr_sdk::prelude::{Keys as NostrKeys, PublicKey as NostrPublicKey, Timestamp as NostrTimestamp, ToBech32 as NostrToBech32};
+pub use nostr_sdk::prelude::{
+    EventBuilder as NostrEventBuilder, Keys as NostrKeys, Kind as NostrKind, PublicKey as NostrPublicKey, Tag as NostrTag,
+    Timestamp as NostrTimestamp, ToBech32 as NostrToBech32,
+};

@@ -99,7 +99,7 @@ the same Marmot group. `KEYGEN=dealer` makes the scripts use the trusted dealer 
 | `scripts/spike.sh` | cdk-mintd with no keys, signing through CDK's reference remote signer |
 | `scripts/m2.sh` | 2-of-3 threshold signing with in-process guardians |
 | `scripts/m3.sh` | guardians as separate processes over Marmot; kill one, kill two, restart one |
-| `scripts/m4.sh` | plus ledgers, the hourly cap, fast refusal and the dashboard; checks that each guardian's outstanding total equals the wallets' balance; then attacks the guardians as a compromised mint host (`examples/evil_mintd.rs`) and checks each attack is refused |
+| `scripts/m4.sh` | plus ledgers, the hourly cap, fast refusal and the dashboard; checks that each guardian's outstanding total equals the wallets' balance; then attacks the guardians as a compromised mint host (`examples/evil_mintd.rs`) and checks each attack is refused; restarts a guardian that missed most of the run and checks it catches up exactly; audits the public ledgers |
 
 `cargo test --workspace` runs the unit and integration tests (threshold maths against the
 `cashu` crate's own checks, the coordinator with cheating and offline guardians, a Marmot
@@ -107,3 +107,7 @@ group on an in-process relay, and the guardian rules: unbalanced swaps, forged o
 evidence, double spends across swaps and melts, over-issuing against a quote).
 
 To attack a running demo yourself: `cargo run -p splitnut-coord --example evil_mintd -- --tls-dir .demo/certs`.
+
+To audit a running demo from the outside (the guardians' signed public ledgers):
+`cargo run -p splitnut-coord --example audit -- --roster .demo/roster.json --relay ws://127.0.0.1:7777`.
+Guardians publish every 30 s (`--publish-secs`).

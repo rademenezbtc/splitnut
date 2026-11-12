@@ -65,6 +65,15 @@ pub fn swap_op(ys: &[String]) -> String {
     format!("swap:{}", hex::encode(Sha256::digest(ys.join("\n").as_bytes())))
 }
 
+/// Count approved outputs as issued (keyed by `B'`, so retries, peers' approvals and the
+/// coordinator's announcement all count once). Counting at approval, not on the coordinator's
+/// announcement, means a coordinator that stays quiet cannot make issuance look smaller.
+fn record_outputs(ledger: &Ledger, items: &[WireSignItem], now: u64) -> Result<(), String> {
+    let outs: Vec<(String, u64)> = items.iter().map(|i| (i.b.to_lowercase(), i.amount)).collect();
+    ledger.record_issued(&outs, now).map_err(db)?;
+    Ok(())
+}
+
 fn melt_op(quote_id: &str) -> String {
     format!("melt:{quote_id}")
 }
@@ -195,6 +204,7 @@ impl Rules {
                     ledger.record_spend(&c.y, c.amount, &op, true, now).map_err(db)?;
                 }
                 ledger.record_op(&op, &hash, total, now).map_err(db)?;
+                record_outputs(ledger, items, now)?;
                 Ok(())
             }
             Some(WireOp::Melt { quote_id, amount, request, inputs }) => {
@@ -219,6 +229,7 @@ impl Rules {
                     ledger.record_spend(&c.y, c.amount, &op, true, now).map_err(db)?;
                 }
                 ledger.record_op(&op, &hash, total, now).map_err(db)?;
+                record_outputs(ledger, items, now)?;
                 Ok(())
             }
             Some(WireOp::Mint { quotes }) => {
@@ -268,6 +279,7 @@ impl Rules {
                 ledger.check_cap(total, now).map_err(refused)?;
                 self.record_mint(ledger, &op, &hash, total, &remaining, &hashes, now)?;
                 ledger.record_signed(0, total, now).map_err(db)?;
+                record_outputs(ledger, items, now)?;
                 Ok(())
             }
         }
@@ -335,6 +347,26 @@ impl Rules {
         }
     }
 
+    /// Another guardian approved a proof check for a melt: record the spends (unverified, as for
+    /// our own approval) so they block reuse here too.
+    pub fn apply_peer_verify(&self, ledger: &Ledger, ys: &[(String, u64)], context: &WireOp, now: u64) -> Result<Option<String>, String> {
+        let WireOp::Melt { quote_id, .. } = context else { return Ok(None) };
+        let op = melt_op(quote_id);
+        let mut conflict = None;
+        for (y, amount) in ys {
+            match ledger.spent_by(y).map_err(db)? {
+                Some(by) if by != op => {
+                    ledger.note_double_spend(y).map_err(db)?;
+                    conflict = Some(format!("a peer approved {op} spending an input this guardian saw spent by {by}"));
+                }
+                _ => {
+                    ledger.record_spend(y, *amount, &op, false, now).map_err(db)?;
+                }
+            }
+        }
+        Ok(conflict)
+    }
+
     /// Apply an announcement of a finished operation (every guardian, signer or not). Returns
     /// a warning when the announced spends conflict with this guardian's records: the
     /// coordinator then got t other guardians to sign a double spend.
@@ -347,6 +379,8 @@ impl Rules {
     ) -> Result<Option<String>, String> {
         let total: u64 = outputs.iter().map(|(a, _)| a).sum();
         let hash = outputs_hash(outputs.iter().map(|(a, b)| (*a, b.as_str())));
+        let outs: Vec<(String, u64)> = outputs.iter().map(|(a, b)| (b.to_lowercase(), *a)).collect();
+        ledger.record_issued(&outs, now).map_err(db)?;
         let (op, checked) = match context {
             WireOp::Mint { quotes } => {
                 let op = mint_op(quotes);

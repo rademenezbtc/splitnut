@@ -82,17 +82,23 @@ wallets and all settings: [docs/RUNNING.md](docs/RUNNING.md).
       coordinator relaying them cannot read them). Nobody ever holds a whole mint key; the
       trusted dealer remains only as an option (`KEYGEN=dealer`). `m4.sh` and `demo.sh` use
       DKG ([docs/dkg.md](docs/dkg.md))
+- [x] **Catch-up and public ledgers:** guardians learn every spend from each other's signed
+      replies in the group, not only from the coordinator; a guardian back from being offline
+      replays the history it missed and refuses to sign until it has. Every guardian publishes
+      its totals as a signed Nostr event, and `examples/audit.rs` lets anyone fetch and compare
+      them. In `m4.sh` a guardian offline for most of the run catches up to identical totals,
+      and the audit finds all three agreeing with the wallets ([docs/catch-up-and-ledger.md](docs/catch-up-and-ledger.md))
 
 ## Next
 
 The goal is for every guardian to sign only what it can justify itself, without trusting the
 mint host or the coordinator. Swaps and melts now meet that goal; what is left:
 
-1. **A public ledger.** Guardians publish signed totals to Nostr, so anyone can compare the
-   ecash in circulation with the mint's reserves.
-2. **Catch-up.** A guardian that was offline replays the operations it missed and refuses to
-   sign while behind, so double-spend protection doesn't depend on every announcement arriving.
-3. **Upstream** the operation-context change to CDK.
+1. **Upstream** the operation-context change to CDK.
+2. **Less trust in mint quotes:** guardians with their own view of incoming payments (read-only
+   access to the Lightning node, or reserves on chain at an address the guardians control).
+3. **Stronger key generation:** Pedersen-based DKG (no key bias) and resharing, so the
+   guardian set can change without a new keyset.
 
 ## Architecture
 
@@ -177,6 +183,8 @@ New ecash can only come from a mint quote, which guardians cap and count but can
 
 * *Context required.* A request without operation context (a stock cdk-mintd) is refused,
   unless the guardian runs with `--allow-contextless` (v1 rules).
+* *Caught up first.* A guardian that restarts replays the group history it missed and refuses
+  to sign or check proofs until it has.
 * *Swaps and melts.* Every input comes with t guardians' partial evaluations and DLEQs, which
   each guardian checks combine to the proof's `C`. Outputs ≤ inputs − fees (melt change also
   minus the amount paid). No input already spent by another operation. The same inputs are
@@ -202,10 +210,12 @@ New ecash can only come from a mint quote, which guardians cap and count but can
   against quotes that were never paid, up to `cap × n / t` per hour; the ledgers record it.
   Verifying deposits needs guardians with their own view of the payment, for example reserves
   on chain at an address the guardians control; that is roadmap.
-* *Missed announcements.* Guardians learn of spends they did not sign from the coordinator's
-  announcements. A guardian that was offline, or left out, can miss one, so with t − 1
-  colluding guardians the coordinator could get a double spend past a guardian that never heard
-  of the first spend. Catch-up is next.
+* *Relays that withhold.* Guardians learn of spends they did not sign from each other's replies
+  in the group, and a guardian back from being offline replays the group's history from the
+  relays before signing again. A relay operator colluding with t − 1 guardians could withhold
+  messages from the rest, so guardians should use several relays, at least one not run by the
+  mint operator (in the demo the local relay is the operator's). A message dropped while a
+  guardian is online is logged loudly but not recovered until its next restart.
 * *Spending conditions.* P2PK and HTLC locks are checked by the mint only, so a dishonest host
   can let the wrong person spend a locked token. That moves ecash; it does not create any.
 * *Custody.* The operator still holds the Lightning funds. SplitNut targets unbacked issuance
@@ -220,10 +230,12 @@ New ecash can only come from a mint quote, which guardians cap and count but can
   accordingly.
 * *Liveness.* With fewer than t guardians online the mint stops issuing and redeeming. That is
   the intended failure mode, and it is an immediate, explained refusal rather than a hang.
-* *Ledger caveats.* A guardian that was offline misses events, so its totals lag (the dashboard
-  says when online guardians disagree). Proofs count as redeemed only once a guardian has
-  checked evidence that they are genuine; "checked twice" counts refused double-spend attempts.
-  Proofs from a failed melt can afterwards only be retried for the same melt quote.
+* *Ledger caveats.* Issuance is counted when guardians approve outputs, so a signature that
+  was approved but never completed still counts: the error is on the safe side (liabilities
+  overstated). Proofs count as redeemed only once a guardian has checked evidence that they are
+  genuine; "checked twice" counts refused double-spend attempts. Proofs from a failed melt can
+  afterwards only be retried for the same melt quote. Published totals show liabilities;
+  comparing them with reserves still needs the operator's proof of reserves.
 * *Relay rate limits.* Relays typically accept about one event per second per publisher.
   SplitNut batches identical requests into one message and retries rejected publishes, and the
   test runs under a tighter-than-default limit, but very busy mints would need relays that

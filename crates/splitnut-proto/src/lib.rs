@@ -19,6 +19,11 @@ use splitnut_core::{Error, Idx, Scalar};
 
 pub const VERSION: u8 = 1;
 
+/// Nostr kind of a guardian's public ledger event (NIP-78 application data, replaceable).
+pub const LEDGER_KIND: u16 = 30078;
+/// `d` tag prefix of a guardian's ledger event; the keyset id follows.
+pub const LEDGER_D_PREFIX: &str = "splitnut-ledger/";
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Wire {
@@ -212,9 +217,20 @@ pub struct Response {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseBody {
-    Sign1 { parts: Vec<WireRound1> },
+    /// `approved`: digest of the operation this guardian approved (see [`approval_digest`]).
+    /// Every group member sees this reply, so other guardians learn of the approval, and the
+    /// spends in it, directly from this guardian rather than from the coordinator.
+    Sign1 {
+        parts: Vec<WireRound1>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved: Option<String>,
+    },
     Sign2 { s: Vec<String> },
-    Verify { partials: Vec<WirePartial> },
+    Verify {
+        partials: Vec<WirePartial>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved: Option<String>,
+    },
     Pong {
         pending: usize,
         #[serde(default)]
@@ -271,6 +287,15 @@ pub struct WirePartial {
     pub y_i: String,
     pub e: String,
     pub s: String,
+}
+
+/// Digest binding an approval to exactly what was approved: the request kind, its items and its
+/// operation context. A guardian puts it in its reply; others match it against the request
+/// they saw.
+pub fn approval_digest(kind: &str, items: &impl Serialize, context: &WireOp) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(&(kind, items, context)).expect("wire types serialise");
+    hex::encode(Sha256::digest(bytes))
 }
 
 impl Wire {

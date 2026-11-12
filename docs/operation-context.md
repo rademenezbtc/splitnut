@@ -89,11 +89,10 @@ swap a forged input, double-spend, or swap melted proofs are all refused.
   still issue up to the cap against quotes that were never paid; the ledgers record it. Fixing
   this needs guardians with their own view of the payment (for example reserves on chain at an
   address the guardians control).
-* **Double-spend protection relies on announcements.** A guardian that is offline, or that the
-  coordinator leaves out of an announcement, does not learn of a spend. With 2-of-3 and one
-  colluding guardian, the coordinator could route a double spend to the colluder and the one
-  guardian that never heard of the first spend. Guardians catching up on missed operations, and
-  refusing to sign while behind, would close this.
+* **Double-spend protection relies on seeing the group's messages.** Guardians now learn of
+  spends from each other's signed replies, not only from the coordinator, and replay what they
+  missed before signing again (`docs/catch-up-and-ledger.md`). What remains is a relay that
+  withholds messages, in collusion with t − 1 guardians.
 * **Spending conditions** (P2PK, HTLC) are still checked by the mint only. A dishonest host can
   ignore a lock and let the wrong person spend a token. That moves existing ecash between
   users; it does not create any.

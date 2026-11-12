@@ -24,9 +24,10 @@ no keys itself; the guardians produce threshold signatures with standard NUT-12 
 so any Cashu wallet works unchanged. Each guardian enforces an hourly cap and keeps its own
 ledger of DLEQ-verified issuance, and a live dashboard shows every request, the guardians'
 ledgers and what the relay saw (ciphertext only). Kill one guardian and the mint keeps
-working; kill two and it refuses, because no single party can sign. In v1 the guardians
-still sign what the mint host asks for, within the cap; giving them the context to refuse
-unbacked requests is the next step.
+working; kill two and it refuses, because no single party can sign. A small CDK change
+passes each operation to the signer, so every guardian refuses unbalanced swaps, forged inputs
+and double spends itself: even a compromised mint host cannot create ecash through swaps or
+melts. Mint quotes remain the trusted part, capped and counted.
 
 ## Notes (existing work vs. November)
 
@@ -51,8 +52,10 @@ Built in November:
   its DLEQ against the published keys.
 * No fork: cdk-mintd's remote-signer support does all the integration; SplitNut only
   implements CDK's Signatory trait.
-* Honest limits: the signer API carries no operation context, so guardians cannot yet check
-  that swaps balance or quotes were paid; the proposed fix is a small CDK change.
+* Guardians check what they sign: a backwards-compatible CDK commit passes operation context
+  to the signer; an "evil mintd" run shows every attack refused.
+* Honest limits: a guardian cannot prove a mint quote was paid (the mint made the invoice), so
+  issuance is capped and counted, not verified; trusted dealer; custody unchanged.
 * [Check before using] A remote-signer NUT is being drafted (cashubtc/nuts#250, "Mint Remote
   signer standard" in the Cashu dev-call notes). SplitNut is a working threshold
   implementation of such a signer, which could inform that standard.

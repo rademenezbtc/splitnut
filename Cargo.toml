@@ -19,6 +19,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 # CDK is pinned exactly: the signatory gRPC schema must match the cdk-mintd binary we run.
+# The three crates are patched (bottom of this file) to CDK v0.18.3 plus operation context.
 cashu = { version = "=0.18.3" }
 cdk-common = { version = "=0.18.3", default-features = false, features = ["mint"] }
 cdk-signatory = { version = "=0.18.3", default-features = false, features = ["grpc"] }
@@ -53,3 +54,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 splitnut-core = { path = "crates/splitnut-core" }
 splitnut-proto = { path = "crates/splitnut-proto" }
 splitnut-marmot = { path = "crates/splitnut-marmot" }
+
+# CDK v0.18.3 plus one commit: the mint passes operation context (a swap's inputs, a melt's
+# quote and inputs, the quotes behind an issuance) to the signatory, so guardians can refuse
+# unbacked outputs. Build cdk-mintd from the same commit (docs/RUNNING.md).
+[patch.crates-io]
+cashu = { git = "https://github.com/rademenezbtc/cdk", rev = "702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab" }
+cdk-common = { git = "https://github.com/rademenezbtc/cdk", rev = "702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab" }
+cdk-signatory = { git = "https://github.com/rademenezbtc/cdk", rev = "702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab" }

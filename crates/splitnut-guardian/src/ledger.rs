@@ -11,6 +11,17 @@
 //! `outstanding = issued − redeemed` is the ecash in circulation as this guardian sees it,
 //! which anyone can compare with the mint's Lightning balance. A guardian that was offline
 //! misses events, so its totals can lag the others'.
+//!
+//! With operation context (see `policy`), the ledger also holds what the rules need:
+//!
+//! * each spent `Y` is bound to the operation that spent it (`swap:<hash of inputs>` or
+//!   `melt:<quote id>`), so the same proof in another operation is a double spend. A spend
+//!   is *verified* once this guardian has checked evidence that the proof is validly signed;
+//!   only verified spends count as redeemed, unverified ones still block reuse.
+//! * `ops` records which outputs each operation was signed for, so a retry with the same
+//!   outputs is allowed and anything else is refused.
+//! * `quotes` counts what this guardian helped issue against each mint quote, and pins each
+//!   bolt11 payment hash to one quote.
 
 use std::path::Path;
 
@@ -49,8 +60,18 @@ impl Ledger {
             "CREATE TABLE IF NOT EXISTS signed   (ts INTEGER NOT NULL, req INTEGER NOT NULL, amount INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS signed_ts ON signed(ts);
              CREATE TABLE IF NOT EXISTS issued   (b TEXT PRIMARY KEY, amount INTEGER NOT NULL, ts INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS redeemed (y TEXT PRIMARY KEY, amount INTEGER NOT NULL, ts INTEGER NOT NULL, seen INTEGER NOT NULL DEFAULT 1);",
+             CREATE TABLE IF NOT EXISTS redeemed (y TEXT PRIMARY KEY, amount INTEGER NOT NULL, ts INTEGER NOT NULL, seen INTEGER NOT NULL DEFAULT 1);
+             CREATE TABLE IF NOT EXISTS ops      (op TEXT NOT NULL, outputs TEXT NOT NULL, amount INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (op, outputs));
+             CREATE TABLE IF NOT EXISTS quotes   (id TEXT PRIMARY KEY, issued INTEGER NOT NULL DEFAULT 0, payment_hash TEXT UNIQUE);",
         )?;
+        // Ledgers from before operation context: add the spend's operation and verification.
+        let has_op: bool = db.prepare("SELECT 1 FROM pragma_table_info('redeemed') WHERE name = 'op'")?.exists([])?;
+        if !has_op {
+            db.execute_batch(
+                "ALTER TABLE redeemed ADD COLUMN op TEXT;
+                 ALTER TABLE redeemed ADD COLUMN verified INTEGER NOT NULL DEFAULT 1;",
+            )?;
+        }
         Ok(Self { db, cap_per_hour })
     }
 
@@ -114,10 +135,97 @@ impl Ledger {
         Ok((added, dups))
     }
 
+    /// The operation that spent `y`, if any (`Some("")` for a spend recorded without context).
+    pub fn spent_by(&self, y: &str) -> rusqlite::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        self.db
+            .query_row("SELECT COALESCE(op, '') FROM redeemed WHERE y = ?1", params![y], |r| r.get(0))
+            .optional()
+    }
+
+    /// Count a refused double-spend attempt against `y`.
+    pub fn note_double_spend(&self, y: &str) -> rusqlite::Result<()> {
+        self.db.execute("UPDATE redeemed SET seen = seen + 1 WHERE y = ?1", params![y])?;
+        Ok(())
+    }
+
+    /// Bind `y` to `op`. A verified spend counts as redeemed; an unverified one only blocks
+    /// reuse until evidence arrives. Returns the newly redeemed amount. An existing binding to
+    /// another operation is left alone (the caller checks for that first).
+    pub fn record_spend(&self, y: &str, amount: u64, op: &str, verified: bool, now: u64) -> rusqlite::Result<u64> {
+        let v = verified as i64;
+        let n = self.db.execute(
+            "INSERT OR IGNORE INTO redeemed (y, amount, ts, op, verified) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![y, amount as i64, now as i64, op, v],
+        )?;
+        if n == 1 {
+            return Ok(if verified { amount } else { 0 });
+        }
+        if verified {
+            let up = self.db.execute(
+                "UPDATE redeemed SET verified = 1 WHERE y = ?1 AND verified = 0 AND op = ?2",
+                params![y, op],
+            )?;
+            if up == 1 {
+                return Ok(amount);
+            }
+        }
+        Ok(0)
+    }
+
+    /// Output sets (hashes) recorded for `op`.
+    pub fn op_outputs(&self, op: &str) -> rusqlite::Result<Vec<String>> {
+        let mut st = self.db.prepare("SELECT outputs FROM ops WHERE op = ?1")?;
+        let rows = st.query_map(params![op], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    /// Record that `op` was signed for `outputs`; false if it already was.
+    pub fn record_op(&self, op: &str, outputs: &str, amount: u64, now: u64) -> rusqlite::Result<bool> {
+        let n = self.db.execute(
+            "INSERT OR IGNORE INTO ops (op, outputs, amount, ts) VALUES (?1, ?2, ?3, ?4)",
+            params![op, outputs, amount as i64, now as i64],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// What this guardian has helped issue against a mint quote.
+    pub fn quote_issued(&self, id: &str) -> u64 {
+        self.db
+            .query_row("SELECT issued FROM quotes WHERE id = ?1", params![id], |r| r.get::<_, i64>(0))
+            .map(|v| v as u64)
+            .unwrap_or(0)
+    }
+
+    pub fn add_quote_issued(&self, id: &str, amount: u64) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT INTO quotes (id, issued) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET issued = issued + ?2",
+            params![id, amount as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The quote a bolt11 payment hash is pinned to, if any.
+    pub fn quote_for_payment_hash(&self, hash: &str) -> rusqlite::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        self.db
+            .query_row("SELECT id FROM quotes WHERE payment_hash = ?1", params![hash], |r| r.get(0))
+            .optional()
+    }
+
+    pub fn pin_payment_hash(&self, id: &str, hash: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT INTO quotes (id, issued, payment_hash) VALUES (?1, 0, ?2)
+             ON CONFLICT(id) DO UPDATE SET payment_hash = ?2 WHERE payment_hash IS NULL",
+            params![id, hash],
+        )?;
+        Ok(())
+    }
+
     pub fn totals(&self, now: u64) -> Totals {
         let sum = |sql: &str| self.db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0);
         let issued = sum("SELECT COALESCE(SUM(amount), 0) FROM issued");
-        let redeemed = sum("SELECT COALESCE(SUM(amount), 0) FROM redeemed");
+        let redeemed = sum("SELECT COALESCE(SUM(amount), 0) FROM redeemed WHERE verified = 1");
         let duplicates = sum("SELECT COALESCE(SUM(seen - 1), 0) FROM redeemed");
         Totals {
             issued: issued as u64,

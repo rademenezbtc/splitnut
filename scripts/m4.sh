@@ -7,7 +7,12 @@
 #     the reason;
 #   * heartbeats make the two-guardians-down refusal immediate;
 #   * the guardians' outstanding totals must equal the wallets' combined balance;
-#   * the dashboard runs on http://127.0.0.1:8090/ (screenshots in $W if Playwright is there).
+#   * the dashboard runs on http://127.0.0.1:8090/ (screenshots in $W if Playwright is there);
+#   * operation context: cdk-mintd passes each operation to the signer, and a "compromised mint
+#     host" (examples/evil_mintd.rs) tries over-issuing, unbalanced swaps, forged inputs and
+#     double spends against the guardians; each must be refused.
+#
+# Needs cdk-mintd and cdk-cli built from CDK v0.18.3 plus operation context (docs/RUNNING.md).
 #
 #   CDK_BIN=/path/to/cdk/target/release ./scripts/m4.sh
 #   KEEP=1 ...  leaves everything running at the end so you can look at the dashboard
@@ -22,7 +27,8 @@ SN="$ROOT/target/debug"
 RELAYS="${RELAYS:-ws://127.0.0.1:7777}"
 RELAY_ARGS=(); for r in $RELAYS; do RELAY_ARGS+=(--relay "$r"); done
 
-(cd "$ROOT" && cargo build -q -p splitnut-dealer -p splitnut-coord -p splitnut-guardian -p splitnut-relay)
+(cd "$ROOT" && cargo build -q -p splitnut-dealer -p splitnut-coord -p splitnut-guardian -p splitnut-relay \
+  && cargo build -q -p splitnut-coord --example evil_mintd)
 rm -rf "$W"; mkdir -p "$W/mint" "$W/keys" "$W/logs"
 cleanup() { [ -n "${KEEP:-}" ] && { echo "KEEP set: processes left running; dashboard at $DASH"; return; }; kill $(jobs -p) 2>/dev/null || true; }
 trap cleanup EXIT
@@ -120,6 +126,10 @@ timed "${A[@]}" mint "$MINT" 50 | tail -1
 echo "== mint $CAP into A: over the hourly cap, must be refused with the reason"
 if timeout 60 "${A[@]}" mint "$MINT" "$CAP" > "$W/logs/cap.log" 2>&1; then echo "FAIL: cap not enforced"; exit 1; fi
 grep -o "hourly issuance cap[^;)]*" "$W/logs/cap.log" | head -1
+
+echo
+"$SN/examples/evil_mintd" --tls-dir "$W/certs" || { echo "FAIL: an attack was not refused"; exit 1; }
+echo
 
 BA=$(balance "${A[@]}"); BB=$(balance "${B[@]}")
 echo "A: $BA sat, B: $BB sat, together $((BA + BB)) sat"

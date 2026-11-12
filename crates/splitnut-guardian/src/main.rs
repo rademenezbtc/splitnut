@@ -1,7 +1,7 @@
 //! splitnut-guardian: one of n guardians, each holding one share of every mint key.
 //!
 //! Joins the coordinator's Marmot group, then answers signing and proof-check requests with
-//! partial results. Accepts requests only from the pinned coordinator key, only when
+//! partial results, for operations that pass its rules (see `policy`). Accepts requests only from the pinned coordinator key, only when
 //! addressed to its own index, and only when fresh (stale replays from relay history are
 //! ignored). Its MLS state is kept in an encrypted SQLite file, so a restart resumes the group.
 //!
@@ -11,6 +11,7 @@
 //!       --coordinator npub1... --relay ws://127.0.0.1:7777
 
 mod ledger;
+mod policy;
 
 use std::path::PathBuf;
 
@@ -22,6 +23,7 @@ use std::str::FromStr;
 use cashu::nuts::nut02::Id;
 use cashu::Amount;
 use ledger::Ledger;
+use policy::Rules;
 use splitnut_core::guardian::{Guardian, VerifyItem};
 use splitnut_core::keyfile::{point_hex, read_json, scalar_hex, to_hex_point, GuardianShareFile, PublicKeyset};
 use splitnut_core::{conv, sign};
@@ -69,6 +71,10 @@ enum Cmd {
         /// Ledger database (default: next to the keys file)
         #[arg(long)]
         ledger: Option<PathBuf>,
+        /// Sign requests that come without operation context (a stock cdk-mintd), capped but
+        /// unchecked, as in v1. Off by default: such requests are refused.
+        #[arg(long)]
+        allow_contextless: bool,
     },
 }
 
@@ -83,8 +89,8 @@ async fn main() -> Result<()> {
             println!("{}", k.public_key().to_bech32()?);
             Ok(())
         }
-        Cmd::Run { share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger } => {
-            run(share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger).await
+        Cmd::Run { share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless } => {
+            run(share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless).await
         }
     }
 }
@@ -99,6 +105,7 @@ async fn run(
     max_age_secs: u64,
     cap_per_hour: u64,
     ledger_path: Option<PathBuf>,
+    allow_contextless: bool,
 ) -> Result<()> {
     let file: GuardianShareFile = read_json(&share).with_context(|| format!("reading {}", share.display()))?;
     let guardian = Guardian::from_file(&file).context("share file failed its self-check")?;
@@ -108,7 +115,8 @@ async fn run(
     let db = db.unwrap_or_else(|| keys_path.with_extension("mls.sqlite"));
     let ledger_path = ledger_path.unwrap_or_else(|| keys_path.with_extension("ledger.sqlite"));
     let ledger = Ledger::open(&ledger_path, cap_per_hour).context("opening ledger")?;
-    let mut state = State { keyset_id: Id::from_str(&file.keyset.keyset_id)?, keyset: file.keyset.clone(), guardian, ledger };
+    let rules = Rules::new(file.keyset.clone(), allow_contextless);
+    let mut state = State { keyset_id: Id::from_str(&file.keyset.keyset_id)?, keyset: file.keyset.clone(), guardian, ledger, rules };
 
     let node = MarmotNode::start(NodeConfig {
         keys: keys.clone(),
@@ -119,7 +127,7 @@ async fn run(
     .await?;
     let t = state.ledger.totals(now());
     info!(
-        index, npub = %keys.public_key().to_bech32()?, keyset = %state.keyset.keyset_id, cap_per_hour,
+        index, npub = %keys.public_key().to_bech32()?, keyset = %state.keyset.keyset_id, cap_per_hour, allow_contextless,
         issued = t.issued, redeemed = t.redeemed, "guardian started"
     );
     let mut rx = node.subscribe();
@@ -174,6 +182,7 @@ fn now() -> u64 {
 struct State {
     guardian: Guardian,
     ledger: Ledger,
+    rules: Rules,
     keyset: PublicKeyset,
     keyset_id: Id,
 }
@@ -206,10 +215,14 @@ impl State {
                 self.guardian.abort(req);
                 None
             }
-            RequestBody::Sign1 { items, .. } => {
-                let total: u64 = items.iter().map(|i| i.amount).sum();
-                if let Err(m) = self.ledger.check_cap(total, now()) {
+            RequestBody::Sign1 { items, context, .. } => {
+                // Round 1 already reveals this guardian's share of each signature, so the
+                // operation is checked (and recorded) here, before anything is released.
+                if let Err(m) = self.rules.approve_sign(&self.ledger, items, context.as_ref(), now()) {
                     return err(m);
+                }
+                if let Some(c) = context {
+                    info!(req, operation = c.kind(), outputs = items.len(), "operation approved");
                 }
                 let r = sign_items_from_wire(items)
                     .and_then(|items| self.guardian.round1(req, &items, &mut OsRng))
@@ -220,40 +233,30 @@ impl State {
                 }
             }
             RequestBody::Sign2 { items, es, .. } => {
-                let total: u64 = items.iter().map(|i| i.amount).sum();
-                // Checked again: other requests may have used the allowance since round 1.
-                if let Err(m) = self.ledger.check_cap(total, now()) {
-                    self.guardian.abort(req);
-                    return err(m);
-                }
+                // Approved and recorded in round 1; round 2 only completes the DLEQ.
                 let r = sign_items_from_wire(items)
                     .and_then(|items| Ok((items, scalars_from_wire(es)?)))
                     .and_then(|(items, es)| self.guardian.round2(req, &items, &es));
                 match r {
-                    Ok(s) => {
-                        if let Err(e) = self.ledger.record_signed(req, total, now()) {
-                            warn!("ledger: {e}");
-                        }
-                        Some(ResponseBody::Sign2 { s: scalars_to_wire(&s) })
-                    }
+                    Ok(s) => Some(ResponseBody::Sign2 { s: scalars_to_wire(&s) }),
                     Err(e) => err(e.to_string()),
                 }
             }
-            RequestBody::Verify { items, .. } => {
+            RequestBody::Verify { items, context, .. } => {
                 let ys = items
                     .iter()
                     .map(|it| Ok(VerifyItem { amount: it.amount, y: conv::hash_to_curve(it.secret.as_bytes())? }))
                     .collect::<Result<Vec<_>, splitnut_core::Error>>();
-                let r = ys.and_then(|ys| Ok((self.guardian.verify(&ys, &mut OsRng)?, ys)));
-                match r {
-                    Ok((partials, ys)) => {
-                        let seen: Vec<(String, u64)> =
-                            ys.iter().filter_map(|v| Some((to_hex_point(&v.y).ok()?, v.amount))).collect();
-                        match self.ledger.record_redeemed(&seen, now()) {
-                            Ok((_, dups)) if dups > 0 => warn!(req, dups, "proofs seen before (double-spend attempt or retry)"),
-                            Ok(_) => {}
-                            Err(e) => warn!("ledger: {e}"),
-                        }
+                let ys = match ys {
+                    Ok(ys) => ys,
+                    Err(e) => return err(e.to_string()),
+                };
+                let seen: Vec<(String, u64)> = ys.iter().filter_map(|v| Some((to_hex_point(&v.y).ok()?, v.amount))).collect();
+                if let Err(m) = self.rules.approve_verify(&self.ledger, &seen, context.as_ref(), now()) {
+                    return err(m);
+                }
+                match self.guardian.verify(&ys, &mut OsRng) {
+                    Ok(partials) => {
                         match partials.iter().map(partial_to_wire).collect::<Result<Vec<_>, _>>() {
                             Ok(partials) => Some(ResponseBody::Verify { partials }),
                             Err(e) => err(e.to_string()),
@@ -262,7 +265,7 @@ impl State {
                     Err(e) => err(e.to_string()),
                 }
             }
-            RequestBody::Issued { outputs, .. } => {
+            RequestBody::Issued { outputs, context, .. } => {
                 let mut ok = vec![];
                 let mut bad = 0;
                 for o in outputs {
@@ -280,8 +283,17 @@ impl State {
                     warn!(req, bad, "announced signatures that do not verify; not counted");
                 }
                 match self.ledger.record_issued(&ok, now()) {
-                    Ok(added) => info!(req, added, outputs = ok.len(), "issuance verified and recorded"),
+                    Ok(added) if !ok.is_empty() => info!(req, added, outputs = ok.len(), "issuance verified and recorded"),
+                    Ok(_) => {}
                     Err(e) => warn!("ledger: {e}"),
+                }
+                if let (Some(c), 0) = (context, bad) {
+                    let announced: Vec<(u64, String)> = outputs.iter().map(|o| (o.amount, o.b.clone())).collect();
+                    match self.rules.apply_announcement(&self.ledger, &announced, c, now()) {
+                        Ok(Some(conflict)) => warn!(req, "DOUBLE SPEND: {conflict}"),
+                        Ok(None) => debug!(req, operation = c.kind(), "announcement applied"),
+                        Err(e) => warn!(req, operation = c.kind(), "announcement not applied: {e}"),
+                    }
                 }
                 None
             }

@@ -3,13 +3,21 @@
 ## What you need
 
 * Rust (stable) and `protoc` (to build CDK).
-* CDK v0.18.3's `cdk-mintd` and `cdk-cli`:
+* `cdk-mintd` and `cdk-cli` from CDK v0.18.3 plus one commit that passes operation context to
+  the signer (the mint says what each signature is for, so guardians can check it). It is
+  branch `splitnut/operation-context` of https://github.com/rademenezbtc/cdk, the same commit
+  SplitNut's `Cargo.toml` patches in:
 
   ```sh
-  git clone https://github.com/cashubtc/cdk && cd cdk && git checkout v0.18.3
+  git clone https://github.com/rademenezbtc/cdk && cd cdk
+  git checkout 702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab   # splitnut/operation-context
   cargo build --release -p cdk-mintd -p cdk-cli
   export CDK_BIN=$PWD/target/release
   ```
+
+  A stock cdk-mintd sends no context, and the guardians refuse it ("no operation context").
+  To run against one anyway, with v1's weaker rules (cap every signature, check nothing), start
+  the guardians with `--allow-contextless`.
 
   If cdk-mintd later fails with a bare "transport error", your OpenSSL is older than 3.2 and
   CDK's own certificate script made a v1 client certificate. SplitNut's `scripts/gen-certs.sh`
@@ -74,8 +82,11 @@ signature against the mint's published keys, exactly as for a single-key mint.
 | `scripts/spike.sh` | cdk-mintd with no keys, signing through CDK's reference remote signer |
 | `scripts/m2.sh` | 2-of-3 threshold signing with in-process guardians |
 | `scripts/m3.sh` | guardians as separate processes over Marmot; kill one, kill two, restart one |
-| `scripts/m4.sh` | plus ledgers, the hourly cap, fast refusal and the dashboard; checks that each guardian's outstanding total equals the wallets' balance |
+| `scripts/m4.sh` | plus ledgers, the hourly cap, fast refusal and the dashboard; checks that each guardian's outstanding total equals the wallets' balance; then attacks the guardians as a compromised mint host (`examples/evil_mintd.rs`) and checks each attack is refused |
 
 `cargo test --workspace` runs the unit and integration tests (threshold maths against the
 `cashu` crate's own checks, the coordinator with cheating and offline guardians, a Marmot
-group on an in-process relay).
+group on an in-process relay, and the guardian rules: unbalanced swaps, forged or thin input
+evidence, double spends across swaps and melts, over-issuing against a quote).
+
+To attack a running demo yourself: `cargo run -p splitnut-coord --example evil_mintd -- --tls-dir .demo/certs`.

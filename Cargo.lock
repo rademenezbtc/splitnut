@@ -449,8 +449,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "cashu"
 version = "0.18.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fae7ec6607dd662c92d6f5582b86be608b7709eefe08cfce965a8733f163449"
+source = "git+https://github.com/rademenezbtc/cdk?rev=702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab#702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab"
 dependencies = [
  "bitcoin",
  "cbor-diag",
@@ -512,8 +511,7 @@ dependencies = [
 [[package]]
 name = "cdk-common"
 version = "0.18.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "267bdcdf8a6bbc7fca2c531225f084f93ada55ad763a16dcfcd3d2d126218dfc"
+source = "git+https://github.com/rademenezbtc/cdk?rev=702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab#702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -543,8 +541,7 @@ dependencies = [
 [[package]]
 name = "cdk-signatory"
 version = "0.18.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a81e8eb20eaf45b0cbb5dc5d0e3bbfffd1292a47b9634bca735045d7db59cba"
+source = "git+https://github.com/rademenezbtc/cdk?rev=702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab#702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3907,9 +3904,11 @@ dependencies = [
  "anyhow",
  "cashu",
  "clap",
+ "hex",
  "rand_core 0.6.4",
  "rusqlite",
  "serde",
+ "sha2",
  "splitnut-core",
  "splitnut-marmot",
  "splitnut-proto",

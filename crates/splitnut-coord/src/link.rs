@@ -10,6 +10,7 @@ use splitnut_core::guardian::{Guardian, RequestId, SignItem, VerifyItem};
 use splitnut_core::sign::Round1;
 use splitnut_core::verify::Partial;
 use splitnut_core::{conv, Idx, Scalar};
+use splitnut_proto::WireOp;
 use tokio::sync::Mutex;
 
 #[derive(Debug, thiserror::Error)]
@@ -34,23 +35,26 @@ pub struct PingInfo {
 /// Tells every guardian about finished signatures (one broadcast, no replies).
 #[async_trait]
 pub trait Announce: Send + Sync {
-    async fn issued(&self, req: RequestId, outputs: Vec<splitnut_proto::WireIssued>);
+    /// `context` carries the operation (with input evidence) so every guardian records spends.
+    async fn issued(&self, req: RequestId, outputs: Vec<splitnut_proto::WireIssued>, context: Option<WireOp>);
 }
 
 #[async_trait]
 pub trait GuardianLink: Send + Sync {
     fn index(&self) -> Idx;
-    async fn round1(&self, req: RequestId, items: Vec<SignItem>) -> Result<Vec<Round1>, LinkError>;
+    /// Round 1; `context` is what the outputs are for (guardians check it before answering).
+    async fn round1(&self, req: RequestId, items: Vec<SignItem>, context: Option<WireOp>) -> Result<Vec<Round1>, LinkError>;
     async fn round2(&self, req: RequestId, items: Vec<SignItem>, es: Vec<Scalar>) -> Result<Vec<Scalar>, LinkError>;
     async fn abort(&self, req: RequestId);
     async fn ping(&self, req: RequestId) -> Result<PingInfo, LinkError>;
     /// Partial evaluations for proofs given as `(amount, secret)`; the guardian computes
-    /// `Y = hash_to_curve(secret)` itself.
-    async fn verify(&self, req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError>;
+    /// `Y = hash_to_curve(secret)` itself. `context` is the operation they are inputs to.
+    async fn verify(&self, req: RequestId, items: Vec<(u64, String)>, context: Option<WireOp>) -> Result<Vec<Partial>, LinkError>;
 }
 
 /// A guardian living inside the coordinator process, for tests and milestone 2.
-/// It can be switched offline and given an artificial delay.
+/// It can be switched offline and given an artificial delay. It holds shares only, no ledger,
+/// so it ignores operation context (the rules live in the guardian daemon).
 pub struct LocalGuardian {
     index: Idx,
     inner: Mutex<Guardian>,
@@ -91,7 +95,7 @@ impl GuardianLink for LocalGuardian {
         self.index
     }
 
-    async fn round1(&self, req: RequestId, items: Vec<SignItem>) -> Result<Vec<Round1>, LinkError> {
+    async fn round1(&self, req: RequestId, items: Vec<SignItem>, _context: Option<WireOp>) -> Result<Vec<Round1>, LinkError> {
         self.gate().await?;
         let mut g = self.inner.lock().await;
         g.round1(req, &items, &mut OsRng).map_err(|e| LinkError::Refused(self.index, e.to_string()))
@@ -112,7 +116,7 @@ impl GuardianLink for LocalGuardian {
         Ok(PingInfo { pending: self.inner.lock().await.pending_requests(), ledger: None })
     }
 
-    async fn verify(&self, _req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError> {
+    async fn verify(&self, _req: RequestId, items: Vec<(u64, String)>, _context: Option<WireOp>) -> Result<Vec<Partial>, LinkError> {
         self.gate().await?;
         let refused = |e: splitnut_core::Error| LinkError::Refused(self.index, e.to_string());
         let items = items

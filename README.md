@@ -7,17 +7,24 @@ will, and no wallet can tell. SplitNut splits every mint key into shares held by
 guardians; any *t* of them must cooperate to produce a signature, so neither the mint server
 nor any one guardian has a key to steal or misuse.
 
-What the guardians agree to sign is the weaker half today. In v1 they sign what the mint asks
-for, up to an hourly cap, and keep independent ledgers of what they signed, but they cannot
-yet check *why* a signature was requested. So a dishonest or compromised mint host can still
-issue unbacked ecash within the cap; the ledgers make it visible rather than stop it. Closing
-that gap is the current work: see [Next](#next) and the [threat model](#threat-model).
+The guardians also check *what* they sign. A small CDK change makes the mint tell the signer
+what each signature is for: a swap's inputs, a melt's quote and inputs, the quotes behind an
+issuance. Each guardian checks it before releasing its share. It refuses swaps whose outputs
+exceed their inputs, inputs it cannot verify as genuine, inputs already spent (including by a
+melt), and issuance beyond what a quote was paid. So swaps and melts cannot create ecash, even
+if the mint host is compromised. The one thing guardians must still take on trust is that a
+mint quote was paid: that is capped per hour, allowed once per quote and recorded in every
+guardian's ledger. See [operation context](docs/operation-context.md) and the
+[threat model](#threat-model).
 
 * **Wallets see a normal mint.** Standard keysets, token format and NUT-12 DLEQ proofs. Tested
   with cdk-cli, which verifies every threshold signature's DLEQ; cashu-ts (used by cashu.me)
   checks DLEQs the same way.
-* **No mint fork.** Stock `cdk-mintd` already sends all signing to a remote signer over gRPC.
-  SplitNut *is* that signer: a coordinator that gathers threshold shares from guardians.
+* **Almost no mint fork.** `cdk-mintd` already sends all signing to a remote signer over gRPC,
+  and SplitNut *is* that signer: a coordinator that gathers threshold shares from guardians.
+  The one change is a backwards-compatible CDK commit that passes operation context to the
+  signer ([rademenezbtc/cdk@702e5bc](https://github.com/rademenezbtc/cdk/commit/702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab)),
+  to be proposed upstream.
 * **Guardians coordinate over Marmot** (MLS over Nostr): an end-to-end encrypted group where
   relays see only ciphertext. Any Nostr relays work; `splitnut-relay` is a local one with a
   wire tap that counts events and flags any plaintext.
@@ -32,7 +39,8 @@ guardians' ledgers match the wallets and the relay read nothing.
 
 ![SplitNut dashboard: guardians around the mint, live ledgers, what the relay sees, and the request log](docs/dashboard.png)
 
-**Try it** (needs CDK v0.18.3's `cdk-mintd` and `cdk-cli`, see [docs/RUNNING.md](docs/RUNNING.md)):
+**Try it** (needs `cdk-mintd` and `cdk-cli` from CDK v0.18.3 plus the operation-context commit,
+see [docs/RUNNING.md](docs/RUNNING.md)):
 
 ```sh
 CDK_BIN=/path/to/cdk/target/release ./scripts/demo.sh
@@ -63,25 +71,28 @@ wallets and all settings: [docs/RUNNING.md](docs/RUNNING.md).
       (`scripts/demo.sh`), demo video (re-recordable with `scripts/video/record.py`), deck,
       submission kit ([docs/SUBMISSION.md](docs/SUBMISSION.md)); still to do: a run on public
       relays and a phone wallet
+- [x] **Operation context:** a CDK commit passes each operation to the signer, and guardians
+      check it: swaps and melts must balance, inputs must carry evidence that they are genuine,
+      no input may be spent twice, issuance is bounded by its quotes, and the cap applies to new
+      money only. `examples/evil_mintd.rs` attacks the guardians as a compromised mint host;
+      `m4.sh` runs it and every attack is refused ([docs/operation-context.md](docs/operation-context.md))
 
 ## Next
 
 The goal is for every guardian to sign only what it can justify itself, without trusting the
-mint host or the coordinator:
+mint host or the coordinator. Swaps and melts now meet that goal; what is left:
 
-1. **Operation context.** A CDK change so the signer receives each operation's inputs and
-   outputs together. Each guardian then refuses a swap or melt whose outputs exceed its
-   inputs, or that spends a proof it has already seen spent. Swaps and melts can no longer
-   create ecash, which leaves mint quotes as the only way new ecash comes into existence.
-2. **Distributed key generation**, replacing the trusted dealer, so no one ever holds a full key.
-3. **Net-issuance cap and a public ledger.** Cap what is issued minus what is redeemed, not all
-   signing, and have guardians publish signed totals to Nostr, so anyone can compare the
+1. **Distributed key generation**, replacing the trusted dealer, so no one ever holds a full key.
+2. **A public ledger.** Guardians publish signed totals to Nostr, so anyone can compare the
    ecash in circulation with the mint's reserves.
+3. **Catch-up.** A guardian that was offline replays the operations it missed and refuses to
+   sign while behind, so double-spend protection doesn't depend on every announcement arriving.
+4. **Upstream** the operation-context change to CDK.
 
 ## Architecture
 
 ```
-wallet ──HTTP──▶ cdk-mintd (unchanged, no keys)
+wallet ──HTTP──▶ cdk-mintd (no keys; passes operation context)
                     │ gRPC (CDK signatory API, mTLS)
                     ▼
               splitnut-coord ──Marmot group──▶ splitnut-guardian × n
@@ -103,7 +114,8 @@ wallet ──HTTP──▶ cdk-mintd (unchanged, no keys)
 
 ```sh
 cargo test --workspace
-git clone https://github.com/cashubtc/cdk && cd cdk && git checkout v0.18.3
+git clone https://github.com/rademenezbtc/cdk && cd cdk
+git checkout 702e5bc76b0cfa88b6b3f4ecb5920bfbf7edd4ab   # v0.18.3 + operation context
 cargo build --release -p cdk-mintd -p cdk-cli   # needs protoc
 cd ../splitnut && CDK_BIN=../cdk/target/release ./scripts/m4.sh
 ```
@@ -111,8 +123,9 @@ cd ../splitnut && CDK_BIN=../cdk/target/release ./scripts/m4.sh
 `m4.sh` deals a 2-of-3 keyset, gives the coordinator and each guardian a Nostr key, starts a
 local relay, three guardian processes, the coordinator and a keyless cdk-mintd, then runs
 cdk-cli through mint, send, receive, double spend and melt, kills guardians one by one,
-restarts one, tries to mint over the hourly cap, and checks that every online guardian's
-outstanding total equals the wallets' combined balance. To use public relays instead:
+restarts one, tries to mint over the hourly cap, attacks the guardians as a compromised mint
+host (each attack must be refused), and checks that every online guardian's outstanding total
+equals the wallets' combined balance. To use public relays instead:
 `RELAYS="wss://relay.damus.io wss://nos.lol" CDK_BIN=... ./scripts/m4.sh`.
 
 Typical run on a laptop-class machine with a local relay: the group forms in about 4 s; a
@@ -132,30 +145,41 @@ Proof checks (`verify_proofs`) work the same way in one round. Details are in
 
 ## Threat model
 
-SplitNut guarantees one thing well: **no single party, the mint operator included, holds a mint
+SplitNut guarantees two things: **no single party, the mint operator included, holds a mint
 key, and a valid signature needs t guardians** (provided the dealer's output was deleted; see
-below). What those guardians agree to sign is weaker in v1, as set out under *Not protected*.
+below); and **swaps and melts cannot create ecash**, because every guardian checks them itself.
+New ecash can only come from a mint quote, which guardians cap and count but cannot verify.
 
 **Protected**
 
 * *Key theft.* cdk-mintd holds no keys, and one guardian's share is useless alone. Stealing the
-  mint server or a single guardian does not yield a mint key. (It does not stop whoever controls
-  the mint host from *requesting* signatures; see *Operation context* below.)
+  mint server or a single guardian does not yield a mint key. Whoever controls the mint host can
+  still *request* signatures, but the guardians check every request (below).
 * *A rogue or offline guardian, below threshold.* Every share is checked against that guardian's
   public share before combining; a bad share names the guardian, who is excluded while the
   request restarts with fresh nonces. Offline guardians are skipped.
 * *Relay operators.* Guardians talk inside an MLS group (Marmot); relays see gift wraps and
   ciphertext only. The bundled relay's wire tap checks this on every event.
 * *The coordinator.* It holds no key material and cannot forge signatures or combine a bad
-  share undetected. It can refuse service or delay requests and, like the mint host, request
-  signatures within the cap.
+  share undetected. It cannot vouch for an input either: guardians check the evidence
+  themselves. It can refuse service or delay requests.
+* *A dishonest or compromised mint host, for swaps and melts.* Guardians refuse unbalanced
+  swaps, inputs without valid evidence, double spends (across swaps and melts) and excess melt
+  change. `examples/evil_mintd.rs` tries all of these.
 
-**Rules guardians enforce in v1**
+**Rules guardians enforce** (details in [docs/operation-context.md](docs/operation-context.md))
 
-* *Hourly signing cap.* Each guardian refuses to help sign more than its cap per rolling hour,
-  checked before both rounds. CDK's signer API carries no context, so the cap counts all
-  signing, swaps and change included, not only new money. A coordinator that rotates signer
-  sets to spread requests can reach at most `cap × n / t` per hour in total.
+* *Context required.* A request without operation context (a stock cdk-mintd) is refused,
+  unless the guardian runs with `--allow-contextless` (v1 rules).
+* *Swaps and melts.* Every input comes with t guardians' partial evaluations and DLEQs, which
+  each guardian checks combine to the proof's `C`. Outputs ≤ inputs − fees (melt change also
+  minus the amount paid). No input already spent by another operation. The same inputs are
+  never signed for two different output sets.
+* *Issuance.* Outputs ≤ what the quotes were paid minus what this guardian already issued
+  against them; one bolt11 payment hash per quote.
+* *Hourly cap on new money.* Each guardian refuses to help issue more than its cap per rolling
+  hour against mint quotes, checked and recorded in round 1 (whose answer already contains its
+  share). A coordinator that rotates signer sets can reach at most `cap × n / t` per hour.
 * *Independent ledgers.* After each signature the coordinator announces the finished
   signatures to all guardians; each guardian checks every DLEQ against the public mint key
   before counting it, so its *issued* total is issuance it can prove happened. Proof checks go
@@ -166,17 +190,18 @@ below). What those guardians agree to sign is weaker in v1, as set out under *No
 
 **Not protected in v1**
 
-* *Operation context.* CDK's signer API passes blinded messages and proofs separately, with no
-  quote or swap id, so guardians sign whatever the mint host sends, up to the cap. A dishonest
-  or compromised host can therefore issue unbacked ecash up to `cap × n / t` per hour; the
-  guardians' ledgers record it but do not stop it. Next step: a CDK change that passes each
-  operation's inputs and outputs to the signer, so every guardian can refuse a swap or melt
-  whose outputs exceed its inputs or that reuses a spent proof.
-* *Mint quotes.* Even with context, a guardian cannot prove that a mint quote's invoice was
-  paid: the mint created the invoice and knows its preimage. (A preimage does prove a *melt*
-  was paid, because there the invoice comes from someone else.) Mint quotes stay capped and
-  counted, not verified. Verifying deposits needs guardians with their own view of the payment,
-  for example reserves on chain at an address the guardians control; that is roadmap.
+* *Mint quotes.* A guardian cannot prove that a mint quote's invoice was paid: the mint created
+  the invoice and knows its preimage. (A preimage does prove a *melt* was paid, because there
+  the invoice comes from someone else.) So a dishonest host can still issue unbacked ecash
+  against quotes that were never paid, up to `cap × n / t` per hour; the ledgers record it.
+  Verifying deposits needs guardians with their own view of the payment, for example reserves
+  on chain at an address the guardians control; that is roadmap.
+* *Missed announcements.* Guardians learn of spends they did not sign from the coordinator's
+  announcements. A guardian that was offline, or left out, can miss one, so with t − 1
+  colluding guardians the coordinator could get a double spend past a guardian that never heard
+  of the first spend. Catch-up is next.
+* *Spending conditions.* P2PK and HTLC locks are checked by the mint only, so a dishonest host
+  can let the wrong person spend a locked token. That moves ecash; it does not create any.
 * *Custody.* The operator still holds the Lightning funds. SplitNut targets unbacked issuance
   (inflation), not theft of the reserves.
 * *Trusted dealer.* Whoever runs the dealer saw every full key once and, with a copy, could sign
@@ -187,11 +212,9 @@ below). What those guardians agree to sign is weaker in v1, as set out under *No
 * *Liveness.* With fewer than t guardians online the mint stops issuing and redeeming. That is
   the intended failure mode, and it is an immediate, explained refusal rather than a hang.
 * *Ledger caveats.* A guardian that was offline misses events, so its totals lag (the dashboard
-  says when online guardians disagree). Proofs checked for a swap the mint then rejects still
-  count as redeemed. The mint re-checks some proofs (for example during a melt); repeats are
-  shown as "checked twice", together with double-spend attempts, rather than blocked. A
-  coordinator could withhold an announcement from non-signers; the signers' own signing totals
-  still record it.
+  says when online guardians disagree). Proofs count as redeemed only once a guardian has
+  checked evidence that they are genuine; "checked twice" counts refused double-spend attempts.
+  Proofs from a failed melt can afterwards only be retried for the same melt quote.
 * *Relay rate limits.* Relays typically accept about one event per second per publisher.
   SplitNut batches identical requests into one message and retries rejected publishes, and the
   test runs under a tighter-than-default limit, but very busy mints would need relays that

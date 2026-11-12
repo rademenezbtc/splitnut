@@ -8,18 +8,25 @@
 //!
 //! `verify_proofs`: one round of partial evaluations with per-guardian DLEQs.
 //!
+//! Operation context: cdk-mintd (with the operation-context patch) says what each request is
+//! for. The coordinator forwards it to the guardians, and gives every input proof *evidence*:
+//! the t partial evaluations, with DLEQs, from a proof check of that input. Each guardian
+//! checks the evidence itself, so it knows the inputs are validly signed without trusting the
+//! coordinator or the mint host. The evidence normally comes from the proof check cdk-mintd
+//! ran a moment earlier for the same operation (cached here); otherwise a fresh check is run.
+//!
 //! Refusals say why ("guardian 2: offline; guardian 3: hourly issuance cap …"). Errors crossing
 //! CDK's gRPC boundary keep only a few kinds, so everything else is `Custom(detail)`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cdk_common::error::Error;
 use cdk_common::{Amount, BlindSignature, BlindedMessage, CurrencyUnit, Id, Keys, Proof, PublicKey};
-use cdk_signatory::signatory::{RotateKeyArguments, Signatory, SignatoryKeySet, SignatoryKeysets};
+use cdk_signatory::signatory::{OperationContext, RotateKeyArguments, Signatory, SignatoryKeySet, SignatoryKeysets};
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde_json::json;
 use splitnut_core::guardian::{RequestId, SignItem};
@@ -27,7 +34,7 @@ use splitnut_core::keyfile::{to_hex_point, to_hex_scalar, PublicKeyset};
 use splitnut_core::sign::{self, Round1, Session};
 use splitnut_core::verify::{self, Partial};
 use splitnut_core::{conv, Idx, ProjectivePoint, Scalar};
-use splitnut_proto::WireIssued;
+use splitnut_proto::{partial_to_wire, WireEvidence, WireInput, WireIssued, WireOp, WireQuote};
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -36,6 +43,14 @@ use crate::status::{unix_ms, Events, Status};
 
 /// How many times a signing request restarts (fresh nonces) after a round-2 failure.
 const MAX_SIGN_ATTEMPTS: usize = 3;
+
+/// How long a proof check's partials are kept as evidence for the signing that follows it.
+const EVIDENCE_TTL: Duration = Duration::from_secs(600);
+/// Most cached evidence entries; older ones are dropped first.
+const EVIDENCE_MAX: usize = 20_000;
+
+/// Partial evaluations of t guardians on one input, from a successful proof check.
+type Evidence = Vec<(Idx, Partial)>;
 
 /// Per-amount public material, parsed once at startup.
 struct AmountKeys {
@@ -56,6 +71,8 @@ pub struct ThresholdSigner {
     events: Arc<Events>,
     next_req: Arc<AtomicU64>,
     timeout: Duration,
+    /// Evidence from recent proof checks, by `Y` (hex).
+    evidence: Mutex<HashMap<String, (Instant, Evidence)>>,
 }
 
 type Triple = (ProjectivePoint, Scalar, Scalar);
@@ -124,6 +141,7 @@ impl ThresholdSigner {
             events,
             next_req,
             timeout,
+            evidence: Mutex::new(HashMap::new()),
         })
     }
 
@@ -143,6 +161,11 @@ impl ThresholdSigner {
         reasons.sort_by_key(|(i, _)| *i);
         reasons.dedup_by_key(|(i, _)| *i);
         let why = reasons.iter().map(|(i, r)| format!("guardian {i}: {r}")).collect::<Vec<_>>().join("; ");
+        // Guardians prefix rule violations with "refused:"; say so rather than blame the network.
+        if reasons.iter().any(|(_, r)| r.starts_with("refused:")) {
+            warn!(agreed, needed = self.t, %why, "guardians refused the operation");
+            return custom(format!("SplitNut guardians refused to sign: {agreed} of {} agreed ({why})", self.t));
+        }
         warn!(agreed, needed = self.t, %why, "quorum unavailable: refusing");
         custom(format!(
             "SplitNut quorum unavailable: {agreed} of {} required guardians answered ({why})",
@@ -209,6 +232,7 @@ impl ThresholdSigner {
         req: RequestId,
         items: &[SignItem],
         keys: &[&AmountKeys],
+        context: &Option<WireOp>,
         exclude: &[Idx],
         reasons: &mut Reasons,
     ) -> Result<Result<(Vec<Idx>, Vec<Triple>), Vec<Idx>>, Error> {
@@ -223,7 +247,8 @@ impl ThresholdSigner {
             .map(|i| {
                 let g = self.guardian(*i).clone();
                 let items = items.to_vec();
-                async move { (g.index(), tokio::time::timeout(self.timeout, g.round1(req, items)).await) }
+                let context = context.clone();
+                async move { (g.index(), tokio::time::timeout(self.timeout, g.round1(req, items, context)).await) }
             })
             .collect();
         let mut answered: Vec<(Idx, Vec<Round1>)> = vec![];
@@ -307,7 +332,7 @@ impl ThresholdSigner {
         Ok(Ok((set, out)))
     }
 
-    async fn announce_issued(&self, req: RequestId, items: &[SignItem], triples: &[Triple]) {
+    async fn announce_issued(&self, req: RequestId, items: &[SignItem], triples: &[Triple], context: Option<WireOp>) {
         let Some(announce) = &self.announce else { return };
         let outputs: Option<Vec<WireIssued>> = items
             .iter()
@@ -323,9 +348,93 @@ impl ThresholdSigner {
             })
             .collect();
         if let Some(outputs) = outputs {
-            announce.issued(req, outputs).await;
+            announce.issued(req, outputs, context).await;
         }
     }
+
+    fn cache_evidence(&self, proofs: &[Proof], evidence: &[Evidence]) {
+        let mut cache = self.evidence.lock().unwrap();
+        cache.retain(|_, (at, _)| at.elapsed() < EVIDENCE_TTL);
+        if cache.len() + proofs.len() > EVIDENCE_MAX {
+            let mut by_age: Vec<(String, Instant)> = cache.iter().map(|(k, (at, _))| (k.clone(), *at)).collect();
+            by_age.sort_by_key(|(_, at)| *at);
+            for (k, _) in by_age.into_iter().take(cache.len() + proofs.len() - EVIDENCE_MAX) {
+                cache.remove(&k);
+            }
+        }
+        for (p, ev) in proofs.iter().zip(evidence) {
+            if let Ok(y) = y_hex(p) {
+                cache.insert(y, (Instant::now(), ev.clone()));
+            }
+        }
+    }
+
+    /// Inputs with evidence that each is validly signed: from the cache, or a fresh proof check.
+    async fn inputs_with_evidence(&self, proofs: &[Proof]) -> Result<Vec<WireInput>, Error> {
+        let mut found: Vec<Option<Evidence>> = {
+            let cache = self.evidence.lock().unwrap();
+            proofs
+                .iter()
+                .map(|p| y_hex(p).ok().and_then(|y| cache.get(&y)).filter(|(at, _)| at.elapsed() < EVIDENCE_TTL).map(|(_, e)| e.clone()))
+                .collect()
+        };
+        let missing: Vec<usize> = (0..proofs.len()).filter(|j| found[*j].is_none()).collect();
+        if !missing.is_empty() {
+            let todo: Vec<Proof> = missing.iter().map(|j| proofs[*j].clone()).collect();
+            let req = self.next_req();
+            info!(req, inputs = todo.len(), "checking inputs for evidence");
+            let (_, evidence) = self.verify_inner(req, &todo, None).await?;
+            for (j, ev) in missing.into_iter().zip(evidence) {
+                found[j] = Some(ev);
+            }
+        }
+        proofs
+            .iter()
+            .zip(found)
+            .map(|(p, ev)| {
+                let evidence = ev
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(i, part)| Ok(WireEvidence { i: *i, partial: partial_to_wire(part)? }))
+                    .collect::<Result<Vec<_>, splitnut_core::Error>>()
+                    .map_err(|e| custom(e.to_string()))?;
+                Ok(WireInput {
+                    amount: u64::from(p.amount),
+                    secret: p.secret.to_string(),
+                    c: p.c.to_hex(),
+                    evidence,
+                })
+            })
+            .collect()
+    }
+
+    /// CDK's operation context in wire form, with evidence for every input.
+    async fn wire_context(&self, context: &OperationContext) -> Result<WireOp, Error> {
+        Ok(match context {
+            OperationContext::Mint { quotes } => WireOp::Mint {
+                quotes: quotes
+                    .iter()
+                    .map(|q| WireQuote {
+                        id: q.quote_id.clone(),
+                        amount_paid: u64::from(q.amount_paid),
+                        amount_issued: u64::from(q.amount_issued),
+                        request: q.request.clone(),
+                    })
+                    .collect(),
+            },
+            OperationContext::Swap { inputs } => WireOp::Swap { inputs: self.inputs_with_evidence(inputs).await? },
+            OperationContext::Melt { quote_id, amount, request, inputs } => WireOp::Melt {
+                quote_id: quote_id.clone(),
+                amount: u64::from(*amount),
+                request: request.clone(),
+                inputs: self.inputs_with_evidence(inputs).await?,
+            },
+        })
+    }
+}
+
+fn y_hex(p: &Proof) -> Result<String, splitnut_core::Error> {
+    to_hex_point(&conv::hash_to_curve(p.secret.as_bytes())?)
 }
 
 #[async_trait::async_trait]
@@ -335,8 +444,21 @@ impl Signatory for ThresholdSigner {
     }
 
     async fn blind_sign(&self, blinded_messages: Vec<BlindedMessage>) -> Result<Vec<BlindSignature>, Error> {
+        self.blind_sign_with_context(blinded_messages, None).await
+    }
+
+    async fn verify_proofs(&self, proofs: Vec<Proof>) -> Result<(), Error> {
+        self.verify_proofs_with_context(proofs, None).await
+    }
+
+    async fn blind_sign_with_context(
+        &self,
+        blinded_messages: Vec<BlindedMessage>,
+        context: Option<OperationContext>,
+    ) -> Result<Vec<BlindSignature>, Error> {
         let started = Instant::now();
         let req = self.next_req();
+        let operation = context.as_ref().map(op_name).unwrap_or("none");
         let mut items = Vec::with_capacity(blinded_messages.len());
         let mut keys = Vec::with_capacity(blinded_messages.len());
         for m in &blinded_messages {
@@ -345,6 +467,10 @@ impl Signatory for ThresholdSigner {
             items.push(SignItem { amount: u64::from(m.amount), b });
         }
         let total: u64 = items.iter().map(|i| i.amount).sum();
+        let context = match &context {
+            Some(c) => Some(self.wire_context(c).await?),
+            None => None,
+        };
 
         let mut exclude = vec![];
         let mut reasons: Reasons = vec![];
@@ -352,7 +478,7 @@ impl Signatory for ThresholdSigner {
         for attempt in 1..=MAX_SIGN_ATTEMPTS {
             // Each attempt gets its own request id, so guardians never see a reused id.
             let attempt_req = if attempt == 1 { req } else { self.next_req() };
-            match self.sign_attempt(attempt_req, &items, &keys, &exclude, &mut reasons).await {
+            match self.sign_attempt(attempt_req, &items, &keys, &context, &exclude, &mut reasons).await {
                 Ok(Ok((set, triples))) => {
                     let sigs = blinded_messages
                         .iter()
@@ -365,12 +491,12 @@ impl Signatory for ThresholdSigner {
                         .collect::<Result<Vec<_>, _>>();
                     if let Ok(sigs) = &sigs {
                         let ms = started.elapsed().as_millis() as u64;
-                        info!(req, signers = ?set, outputs = items.len(), amount = total, attempt, ms, "blind_sign ok");
+                        info!(req, operation, signers = ?set, outputs = items.len(), amount = total, attempt, ms, "blind_sign ok");
                         self.events.emit(json!({
-                            "type": "request", "op": "blind_sign", "req": req, "ok": true, "signers": set,
-                            "outputs": items.len(), "amount": total, "attempt": attempt, "ms": ms,
+                            "type": "request", "op": "blind_sign", "operation": operation, "req": req, "ok": true,
+                            "signers": set, "outputs": items.len(), "amount": total, "attempt": attempt, "ms": ms,
                         }));
-                        self.announce_issued(attempt_req, &items, &triples).await;
+                        self.announce_issued(attempt_req, &items, &triples, context.clone()).await;
                         return Ok(sigs.clone());
                     }
                     result = sigs;
@@ -391,29 +517,44 @@ impl Signatory for ThresholdSigner {
             Ok(_) => unreachable!(),
         };
         self.events.emit(json!({
-            "type": "request", "op": "blind_sign", "req": req, "ok": false, "outputs": items.len(),
-            "amount": total, "ms": started.elapsed().as_millis() as u64, "error": err.to_string(),
+            "type": "request", "op": "blind_sign", "operation": operation, "req": req, "ok": false,
+            "outputs": items.len(), "amount": total, "ms": started.elapsed().as_millis() as u64, "error": err.to_string(),
         }));
         Err(err)
     }
 
-    async fn verify_proofs(&self, proofs: Vec<Proof>) -> Result<(), Error> {
+    async fn verify_proofs_with_context(&self, proofs: Vec<Proof>, context: Option<OperationContext>) -> Result<(), Error> {
         let started = Instant::now();
         let req = self.next_req();
+        let operation = context.as_ref().map(op_name).unwrap_or("none");
         let total: u64 = proofs.iter().map(|p| u64::from(p.amount)).sum();
-        let r = self.verify_inner(req, &proofs).await;
+        // The proofs are the inputs, so the guardians get the operation without them.
+        let wire = context.as_ref().map(bare_wire_op);
+        let r = self.verify_inner(req, &proofs, wire.clone()).await;
         let ms = started.elapsed().as_millis() as u64;
         match &r {
-            Ok(signers) => {
-                info!(req, ?signers, proofs = proofs.len(), ms, "verify_proofs ok");
+            Ok((signers, evidence)) => {
+                info!(req, operation, ?signers, proofs = proofs.len(), ms, "verify_proofs ok");
                 self.events.emit(json!({
-                    "type": "request", "op": "verify_proofs", "req": req, "ok": true, "signers": signers,
-                    "outputs": proofs.len(), "amount": total, "ms": ms,
+                    "type": "request", "op": "verify_proofs", "operation": operation, "req": req, "ok": true,
+                    "signers": signers, "outputs": proofs.len(), "amount": total, "ms": ms,
                 }));
+                self.cache_evidence(&proofs, evidence);
+                // A melt spends its inputs here (a swap does when its outputs are signed): tell
+                // every guardian, with evidence, so each records the spend.
+                if let (Some(WireOp::Melt { quote_id, amount, request, .. }), Some(announce)) = (&wire, &self.announce) {
+                    match self.inputs_with_evidence(&proofs).await {
+                        Ok(inputs) => {
+                            let op = WireOp::Melt { quote_id: quote_id.clone(), amount: *amount, request: request.clone(), inputs };
+                            announce.issued(req, vec![], Some(op)).await;
+                        }
+                        Err(e) => warn!(req, "melt spends not announced: {e}"),
+                    }
+                }
             }
             Err(e) => self.events.emit(json!({
-                "type": "request", "op": "verify_proofs", "req": req, "ok": false, "outputs": proofs.len(),
-                "amount": total, "ms": ms, "error": e.to_string(),
+                "type": "request", "op": "verify_proofs", "operation": operation, "req": req, "ok": false,
+                "outputs": proofs.len(), "amount": total, "ms": ms, "error": e.to_string(),
             })),
         }
         r.map(|_| ())
@@ -435,8 +576,13 @@ impl Signatory for ThresholdSigner {
 }
 
 impl ThresholdSigner {
-    /// Threshold proof check; returns the signer set on success.
-    async fn verify_inner(&self, req: RequestId, proofs: &[Proof]) -> Result<Vec<Idx>, Error> {
+    /// Threshold proof check; returns the signer set and, per proof, the partials that checked.
+    async fn verify_inner(
+        &self,
+        req: RequestId,
+        proofs: &[Proof],
+        context: Option<WireOp>,
+    ) -> Result<(Vec<Idx>, Vec<Evidence>), Error> {
         let mut ys = Vec::with_capacity(proofs.len());
         let mut cs = Vec::with_capacity(proofs.len());
         let mut keys = Vec::with_capacity(proofs.len());
@@ -457,7 +603,8 @@ impl ThresholdSigner {
             .map(|i| {
                 let g = self.guardian(*i).clone();
                 let items = wire_items.clone();
-                async move { (g.index(), tokio::time::timeout(self.timeout, g.verify(req, items)).await) }
+                let context = context.clone();
+                async move { (g.index(), tokio::time::timeout(self.timeout, g.verify(req, items, context)).await) }
             })
             .collect();
 
@@ -481,10 +628,11 @@ impl ThresholdSigner {
             }
             set.sort_by_key(|(i, _)| *i);
             let mut flagged = None;
+            let mut evidence = Vec::with_capacity(proofs.len());
             for j in 0..proofs.len() {
                 let parts: Vec<_> = set.iter().map(|(i, v)| (*i, v[j])).collect();
                 match verify::combine_and_check(&cs[j], &ys[j], &keys[j].public_shares, &parts) {
-                    Ok(()) => {}
+                    Ok(()) => evidence.push(parts),
                     Err(splitnut_core::Error::BadShare(i)) => {
                         flagged = Some(i);
                         break;
@@ -502,8 +650,37 @@ impl ThresholdSigner {
                     reasons.push((i, "sent an invalid partial".into()));
                     bad.push(i);
                 }
-                None => return Ok(set.iter().map(|(i, _)| *i).collect()),
+                None => return Ok((set.iter().map(|(i, _)| *i).collect(), evidence)),
             }
+        }
+    }
+}
+
+fn op_name(c: &OperationContext) -> &'static str {
+    match c {
+        OperationContext::Mint { .. } => "mint",
+        OperationContext::Swap { .. } => "swap",
+        OperationContext::Melt { .. } => "melt",
+    }
+}
+
+/// The operation without inputs, for proof-check requests (the proofs are the inputs).
+fn bare_wire_op(c: &OperationContext) -> WireOp {
+    match c {
+        OperationContext::Mint { quotes } => WireOp::Mint {
+            quotes: quotes
+                .iter()
+                .map(|q| WireQuote {
+                    id: q.quote_id.clone(),
+                    amount_paid: u64::from(q.amount_paid),
+                    amount_issued: u64::from(q.amount_issued),
+                    request: q.request.clone(),
+                })
+                .collect(),
+        },
+        OperationContext::Swap { .. } => WireOp::Swap { inputs: vec![] },
+        OperationContext::Melt { quote_id, amount, request, .. } => {
+            WireOp::Melt { quote_id: quote_id.clone(), amount: u64::from(*amount), request: request.clone(), inputs: vec![] }
         }
     }
 }
@@ -526,8 +703,8 @@ mod tests {
         fn index(&self) -> Idx {
             self.0.index()
         }
-        async fn round1(&self, req: RequestId, items: Vec<SignItem>) -> Result<Vec<Round1>, crate::link::LinkError> {
-            self.0.round1(req, items).await
+        async fn round1(&self, req: RequestId, items: Vec<SignItem>, context: Option<WireOp>) -> Result<Vec<Round1>, crate::link::LinkError> {
+            self.0.round1(req, items, context).await
         }
         async fn round2(&self, req: RequestId, items: Vec<SignItem>, es: Vec<Scalar>) -> Result<Vec<Scalar>, LinkError> {
             Ok(self.0.round2(req, items, es).await?.into_iter().map(|s| s + Scalar::ONE).collect())
@@ -538,8 +715,8 @@ mod tests {
         async fn ping(&self, req: RequestId) -> Result<crate::link::PingInfo, LinkError> {
             self.0.ping(req).await
         }
-        async fn verify(&self, req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError> {
-            let mut v = self.0.verify(req, items).await?;
+        async fn verify(&self, req: RequestId, items: Vec<(u64, String)>, context: Option<WireOp>) -> Result<Vec<Partial>, LinkError> {
+            let mut v = self.0.verify(req, items, context).await?;
             for p in &mut v {
                 p.y_i += ProjectivePoint::GENERATOR;
             }
@@ -646,6 +823,123 @@ mod tests {
         let s = setup(2, 3, Some(1));
         s.locals[0].set_online(false); // guardian 2
         assert!(mint(&s, &[1]).await.is_err());
+    }
+
+    /// Records the context each round 1 carried, and every announcement.
+    struct Recorder {
+        inner: Arc<LocalGuardian>,
+        contexts: Arc<std::sync::Mutex<Vec<Option<WireOp>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GuardianLink for Recorder {
+        fn index(&self) -> Idx {
+            self.inner.index()
+        }
+        async fn round1(&self, req: RequestId, items: Vec<SignItem>, context: Option<WireOp>) -> Result<Vec<Round1>, LinkError> {
+            self.contexts.lock().unwrap().push(context.clone());
+            self.inner.round1(req, items, context).await
+        }
+        async fn round2(&self, req: RequestId, items: Vec<SignItem>, es: Vec<Scalar>) -> Result<Vec<Scalar>, LinkError> {
+            self.inner.round2(req, items, es).await
+        }
+        async fn abort(&self, req: RequestId) {
+            self.inner.abort(req).await
+        }
+        async fn ping(&self, req: RequestId) -> Result<crate::link::PingInfo, LinkError> {
+            self.inner.ping(req).await
+        }
+        async fn verify(&self, req: RequestId, items: Vec<(u64, String)>, context: Option<WireOp>) -> Result<Vec<Partial>, LinkError> {
+            self.inner.verify(req, items, context).await
+        }
+    }
+
+    #[derive(Default)]
+    struct Announcements(std::sync::Mutex<Vec<(usize, Option<WireOp>)>>);
+
+    #[async_trait::async_trait]
+    impl Announce for Announcements {
+        async fn issued(&self, _req: RequestId, outputs: Vec<WireIssued>, context: Option<WireOp>) {
+            self.0.lock().unwrap().push((outputs.len(), context));
+        }
+    }
+
+    /// Every input in `op` carries evidence that combines to its C under the public shares.
+    fn evidence_checks(keyset: &PublicKeyset, op: &WireOp) -> usize {
+        for input in op.inputs() {
+            let y = conv::hash_to_curve(input.secret.as_bytes()).unwrap();
+            let c = splitnut_core::keyfile::point_hex(&input.c).unwrap();
+            let parts: Vec<(Idx, Partial)> =
+                input.evidence.iter().map(|e| (e.i, splitnut_proto::partial_from_wire(&e.partial).unwrap())).collect();
+            assert_eq!(parts.len(), 2);
+            verify::combine_and_check(&c, &y, &keyset.public_shares_for(input.amount).unwrap(), &parts).unwrap();
+        }
+        op.inputs().len()
+    }
+
+    #[tokio::test]
+    async fn context_reaches_guardians_with_input_evidence() {
+        let base = setup(2, 3, None);
+        let contexts = Arc::new(std::sync::Mutex::new(vec![]));
+        let links: Vec<Arc<dyn GuardianLink>> = base
+            .locals
+            .iter()
+            .map(|g| Arc::new(Recorder { inner: g.clone(), contexts: contexts.clone() }) as Arc<dyn GuardianLink>)
+            .collect();
+        let announcements = Arc::new(Announcements::default());
+        let events = Events::new();
+        let status = Status::new(&[1, 2, 3], events.clone());
+        let signer = ThresholdSigner::new(
+            &base.keyset, links, Some(announcements.clone()), status, events, request_counter(), Duration::from_secs(2),
+        )
+        .unwrap();
+        let s = Setup { signer, locals: base.locals, keyset: base.keyset };
+        let id = Id::from_str(&s.keyset.keyset_id).unwrap();
+        let outputs = |amounts: &[u64]| -> Vec<BlindedMessage> {
+            amounts
+                .iter()
+                .map(|a| BlindedMessage::new(Amount::from(*a), id, dhke::blind_message(Secret::generate().as_bytes(), None).unwrap().0))
+                .collect()
+        };
+
+        // A swap as cdk-mintd runs it: proof check with context (evidence cached), then signing.
+        let inputs = mint(&s, &[8, 4]).await.unwrap();
+        s.signer.verify_proofs_with_context(inputs.clone(), Some(OperationContext::Swap { inputs: vec![] })).await.unwrap();
+        contexts.lock().unwrap().clear();
+        s.signer
+            .blind_sign_with_context(outputs(&[8, 4]), Some(OperationContext::Swap { inputs: inputs.clone() }))
+            .await
+            .unwrap();
+        let sent = contexts.lock().unwrap().clone();
+        assert!(!sent.is_empty());
+        for c in &sent {
+            let op = c.as_ref().expect("round 1 carries the context");
+            assert_eq!(op.kind(), "swap");
+            assert_eq!(evidence_checks(&s.keyset, op), 2);
+        }
+        let (n, ctx) = announcements.0.lock().unwrap().last().cloned().unwrap();
+        assert_eq!((n, ctx.map(|c| c.kind())), (2, Some("swap")), "announcement carries the operation");
+
+        // No cached evidence (fresh inputs): the coordinator runs a proof check itself.
+        let fresh = mint(&s, &[2]).await.unwrap();
+        contexts.lock().unwrap().clear();
+        s.signer.blind_sign_with_context(outputs(&[2]), Some(OperationContext::Swap { inputs: fresh })).await.unwrap();
+        let sent = contexts.lock().unwrap().clone();
+        assert_eq!(evidence_checks(&s.keyset, sent[0].as_ref().unwrap()), 1);
+
+        // A melt's proof check announces its spends, with evidence, to every guardian.
+        let melt_inputs = mint(&s, &[16]).await.unwrap();
+        let melt = OperationContext::Melt {
+            quote_id: "mq".into(),
+            amount: Amount::from(10),
+            request: "lnbc1".into(),
+            inputs: vec![],
+        };
+        s.signer.verify_proofs_with_context(melt_inputs, Some(melt)).await.unwrap();
+        let (n, ctx) = announcements.0.lock().unwrap().last().cloned().unwrap();
+        let op = ctx.expect("melt spends announced");
+        assert_eq!((n, op.kind()), (0, "melt"));
+        assert_eq!(evidence_checks(&s.keyset, &op), 1);
     }
 
     #[tokio::test]

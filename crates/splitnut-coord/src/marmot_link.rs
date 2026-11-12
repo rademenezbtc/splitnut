@@ -176,8 +176,8 @@ impl Hub {
 
 #[async_trait]
 impl Announce for Hub {
-    async fn issued(&self, req: RequestId, outputs: Vec<WireIssued>) {
-        self.notify(0, req, RequestBody::Issued { keyset: self.keyset.clone(), outputs }).await;
+    async fn issued(&self, req: RequestId, outputs: Vec<WireIssued>, context: Option<WireOp>) {
+        self.notify(0, req, RequestBody::Issued { keyset: self.keyset.clone(), outputs, context }).await;
     }
 }
 
@@ -202,9 +202,13 @@ impl GuardianLink for MarmotLink {
         self.index
     }
 
-    async fn round1(&self, req: RequestId, items: Vec<SignItem>) -> Result<Vec<Round1>, LinkError> {
+    async fn round1(&self, req: RequestId, items: Vec<SignItem>, context: Option<WireOp>) -> Result<Vec<Round1>, LinkError> {
         let i = self.index;
-        let body = RequestBody::Sign1 { keyset: self.hub.keyset.clone(), items: sign_items_to_wire(&items).map_err(|e| bad(i, e))? };
+        let body = RequestBody::Sign1 {
+            keyset: self.hub.keyset.clone(),
+            items: sign_items_to_wire(&items).map_err(|e| bad(i, e))?,
+            context,
+        };
         match self.hub.call(i, req, body).await? {
             ResponseBody::Sign1 { parts } => parts.iter().map(round1_from_wire).collect::<Result<_, _>>().map_err(|e| bad(i, e)),
             other => Err(bad(i, format!("unexpected {}", other.kind()))),
@@ -235,11 +239,12 @@ impl GuardianLink for MarmotLink {
         }
     }
 
-    async fn verify(&self, req: RequestId, items: Vec<(u64, String)>) -> Result<Vec<Partial>, LinkError> {
+    async fn verify(&self, req: RequestId, items: Vec<(u64, String)>, context: Option<WireOp>) -> Result<Vec<Partial>, LinkError> {
         let i = self.index;
         let body = RequestBody::Verify {
             keyset: self.hub.keyset.clone(),
             items: items.into_iter().map(|(amount, secret)| WireVerifyItem { amount, secret }).collect(),
+            context,
         };
         match self.hub.call(i, req, body).await? {
             ResponseBody::Verify { partials } => partials.iter().map(partial_from_wire).collect::<Result<_, _>>().map_err(|e| bad(i, e)),

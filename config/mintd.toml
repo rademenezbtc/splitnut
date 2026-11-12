@@ -14,7 +14,7 @@ listen_port = 8085
 [mint_info]
 name = "SplitNut threshold mint (demo)"
 description = "Test sats on a fake Lightning backend. Every signature needs 2 of 3 guardians; this server holds no keys."
-description_long = "SplitNut splits each mint key across guardians who coordinate over Marmot (MLS over Nostr). Any t of n must cooperate to sign, so no single operator can create ecash. https://github.com/rademenezbtc/splitnut"
+description_long = "SplitNut splits each mint key across guardians who coordinate over Marmot (MLS over Nostr). Any t of n must cooperate to sign, so no single party holds the mint's keys. https://github.com/rademenezbtc/splitnut"
 motd = "Demo mint: sats here are not real."
 
 [signatory]

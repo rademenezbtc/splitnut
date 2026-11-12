@@ -1,10 +1,17 @@
 # SplitNut
 
-**Cashu, without trusting a single mint operator to keep the money supply honest.**
+**A Cashu mint whose signing keys are split across guardians, so no single party holds them.**
 
 A Cashu mint's private keys normally sit with one operator, who can sign unbacked ecash at
 will, and no wallet can tell. SplitNut splits every mint key into shares held by *n*
-guardians; any *t* of them must cooperate to sign, so the operator alone cannot print money.
+guardians; any *t* of them must cooperate to produce a signature, so neither the mint server
+nor any one guardian has a key to steal or misuse.
+
+What the guardians agree to sign is the weaker half today. In v1 they sign what the mint asks
+for, up to an hourly cap, and keep independent ledgers of what they signed, but they cannot
+yet check *why* a signature was requested. So a dishonest or compromised mint host can still
+issue unbacked ecash within the cap; the ledgers make it visible rather than stop it. Closing
+that gap is the current work: see [Next](#next) and the [threat model](#threat-model).
 
 * **Wallets see a normal mint.** Standard keysets, token format and NUT-12 DLEQ proofs. Tested
   with cdk-cli, which verifies every threshold signature's DLEQ; cashu-ts (used by cashu.me)
@@ -56,6 +63,20 @@ wallets and all settings: [docs/RUNNING.md](docs/RUNNING.md).
       (`scripts/demo.sh`), demo video (re-recordable with `scripts/video/record.py`), deck,
       submission kit ([docs/SUBMISSION.md](docs/SUBMISSION.md)); still to do: a run on public
       relays and a phone wallet
+
+## Next
+
+The goal is for every guardian to sign only what it can justify itself, without trusting the
+mint host or the coordinator:
+
+1. **Operation context.** A CDK change so the signer receives each operation's inputs and
+   outputs together. Each guardian then refuses a swap or melt whose outputs exceed its
+   inputs, or that spends a proof it has already seen spent. Swaps and melts can no longer
+   create ecash, which leaves mint quotes as the only way new ecash comes into existence.
+2. **Distributed key generation**, replacing the trusted dealer, so no one ever holds a full key.
+3. **Net-issuance cap and a public ledger.** Cap what is issued minus what is redeemed, not all
+   signing, and have guardians publish signed totals to Nostr, so anyone can compare the
+   ecash in circulation with the mint's reserves.
 
 ## Architecture
 
@@ -111,19 +132,23 @@ Proof checks (`verify_proofs`) work the same way in one round. Details are in
 
 ## Threat model
 
-SplitNut guarantees one thing well: **no single party, the mint operator included, can produce
-a valid mint signature without t guardians.**
+SplitNut guarantees one thing well: **no single party, the mint operator included, holds a mint
+key, and a valid signature needs t guardians** (provided the dealer's output was deleted; see
+below). What those guardians agree to sign is weaker in v1, as set out under *Not protected*.
 
 **Protected**
 
-* *A compromised mint host.* cdk-mintd holds no keys; stealing the server gets no signing power.
+* *Key theft.* cdk-mintd holds no keys, and one guardian's share is useless alone. Stealing the
+  mint server or a single guardian does not yield a mint key. (It does not stop whoever controls
+  the mint host from *requesting* signatures; see *Operation context* below.)
 * *A rogue or offline guardian, below threshold.* Every share is checked against that guardian's
   public share before combining; a bad share names the guardian, who is excluded while the
   request restarts with fresh nonces. Offline guardians are skipped.
 * *Relay operators.* Guardians talk inside an MLS group (Marmot); relays see gift wraps and
   ciphertext only. The bundled relay's wire tap checks this on every event.
-* *The coordinator.* It holds no key material and cannot forge signatures. It can refuse service
-  or delay requests.
+* *The coordinator.* It holds no key material and cannot forge signatures or combine a bad
+  share undetected. It can refuse service or delay requests and, like the mint host, request
+  signatures within the cap.
 
 **Rules guardians enforce in v1**
 
@@ -141,13 +166,22 @@ a valid mint signature without t guardians.**
 
 **Not protected in v1**
 
-* *Context.* The signer sees blinded messages and proofs separately, with no quote or swap id,
-  so guardians cannot check that a swap balances or that a mint quote was paid. Next step: a
-  CDK change that passes operation context (inputs with outputs, quote id and payment preimage)
-  to the signer, so guardians can enforce "outputs ≤ inputs" and check `sha256(preimage)`
-  against the invoice's payment hash.
-* *Trusted dealer.* Whoever runs the dealer saw every full key once. Delete its output after
-  handing out the share files; distributed key generation is future work.
+* *Operation context.* CDK's signer API passes blinded messages and proofs separately, with no
+  quote or swap id, so guardians sign whatever the mint host sends, up to the cap. A dishonest
+  or compromised host can therefore issue unbacked ecash up to `cap × n / t` per hour; the
+  guardians' ledgers record it but do not stop it. Next step: a CDK change that passes each
+  operation's inputs and outputs to the signer, so every guardian can refuse a swap or melt
+  whose outputs exceed its inputs or that reuses a spent proof.
+* *Mint quotes.* Even with context, a guardian cannot prove that a mint quote's invoice was
+  paid: the mint created the invoice and knows its preimage. (A preimage does prove a *melt*
+  was paid, because there the invoice comes from someone else.) Mint quotes stay capped and
+  counted, not verified. Verifying deposits needs guardians with their own view of the payment,
+  for example reserves on chain at an address the guardians control; that is roadmap.
+* *Custody.* The operator still holds the Lightning funds. SplitNut targets unbacked issuance
+  (inflation), not theft of the reserves.
+* *Trusted dealer.* Whoever runs the dealer saw every full key once and, with a copy, could sign
+  without any guardian. Delete its output after handing out the share files; distributed key
+  generation is the planned replacement.
 * *Collusion.* t guardians together can do anything a single operator could. Choose t and n
   accordingly.
 * *Liveness.* With fewer than t guardians online the mint stops issuing and redeeming. That is

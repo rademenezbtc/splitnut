@@ -30,7 +30,11 @@ use policy::Rules;
 use splitnut_core::guardian::{Guardian, VerifyItem};
 use splitnut_core::keyfile::{point_hex, read_json, scalar_hex, to_hex_point, GuardianShareFile, PublicKeyset};
 use splitnut_core::{conv, sign};
-use splitnut_marmot::{load_or_create_keys, MarmotNode, NodeConfig, NostrPublicKey, NostrToBech32, Role, Storage};
+use splitnut_marmot::{
+    load_or_create_keys, MarmotNode, NodeConfig, NostrEventBuilder, NostrKind, NostrPublicKey, NostrTag, NostrToBech32, Role,
+    Storage,
+};
+use splitnut_proto::{LEDGER_D_PREFIX, LEDGER_KIND};
 use splitnut_proto::*;
 use tracing::{debug, info, warn};
 
@@ -104,6 +108,10 @@ enum Cmd {
         /// unchecked, as in v1. Off by default: such requests are refused.
         #[arg(long)]
         allow_contextless: bool,
+        /// Publish this guardian's ledger totals to the relays every this many seconds, as a
+        /// signed public Nostr event (0 = never)
+        #[arg(long, default_value_t = 30)]
+        publish_secs: u64,
     },
 }
 
@@ -121,8 +129,8 @@ async fn main() -> Result<()> {
         Cmd::Dkg { keys, roster, coordinator, relays, db, out, timeout_secs } => {
             run_dkg(keys, roster, coordinator, relays, db, out, timeout_secs).await
         }
-        Cmd::Run { share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless } => {
-            run(share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless).await
+        Cmd::Run { share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless, publish_secs } => {
+            run(share, keys, coordinator, relays, db, max_age_secs, cap_per_hour, ledger, allow_contextless, publish_secs).await
         }
     }
 }
@@ -138,6 +146,7 @@ async fn run(
     cap_per_hour: u64,
     ledger_path: Option<PathBuf>,
     allow_contextless: bool,
+    publish_secs: u64,
 ) -> Result<()> {
     let file: GuardianShareFile = read_json(&share).with_context(|| format!("reading {}", share.display()))?;
     let guardian = Guardian::from_file(&file).context("share file failed its self-check")?;
@@ -166,45 +175,176 @@ async fn run(
     if !node.is_ready() {
         info!("waiting to be welcomed into the group");
     }
+    let mut observed = Observed::default();
+    let mut publish = tokio::time::interval(std::time::Duration::from_secs(publish_secs.max(5)));
+    publish.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut was_synced = false;
 
     loop {
-        let msg = match rx.recv().await {
-            Ok(m) => m,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!("dropped {n} messages");
+        // Replayed history is queued ahead of anything live, so once the node is synced and
+        // the queue is drained, everything missed while offline has been applied.
+        if !was_synced && node.is_synced() && rx.is_empty() {
+            was_synced = true;
+            let t = state.ledger.totals(now());
+            info!(issued = t.issued, redeemed = t.redeemed, outstanding = t.outstanding, "caught up with the group");
+        }
+        let msg = tokio::select! {
+            m = rx.recv() => match m {
+                Ok(m) => m,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Missed messages may hold spends: say so loudly.
+                    warn!("dropped {n} group messages; this guardian may have missed spends");
+                    continue;
+                }
+                Err(_) => break,
+            },
+            _ = publish.tick(), if publish_secs > 0 => {
+                if node.is_synced() {
+                    publish_ledger(&node, &state, index).await;
+                }
                 continue;
             }
-            Err(_) => break,
         };
-        if msg.from != coordinator {
-            debug!(from = %msg.from, "ignoring message not from the coordinator");
-            continue;
-        }
-        let req = match Wire::from_json(&msg.content) {
-            Ok(Wire::Request(r)) if r.is_for(index) => r,
-            Ok(_) => continue,
+        let wire = match Wire::from_json(&msg.content) {
+            Ok(w) => w,
             Err(e) => {
-                warn!("malformed request: {e}");
+                warn!("malformed message: {e}");
                 continue;
             }
         };
-        let age = now().saturating_sub(msg.created_at.as_secs());
-        if age > max_age_secs {
-            debug!(req = req.req, age, "ignoring stale request");
-            continue;
-        }
-        let Some(body) = state.handle(&req.body, req.req) else { continue };
-        match &body {
-            ResponseBody::Error { msg } => warn!(req = req.req, kind = req.body.kind(), "refusing: {msg}"),
-            ResponseBody::Pong { .. } => debug!(req = req.req, "pong"),
-            _ => info!(req = req.req, kind = req.body.kind(), "answered"),
-        }
-        let resp = Wire::Response(Response { v: VERSION, from: index, req: req.req, body });
-        if let Err(e) = node.send(resp.to_json()).await {
-            warn!(req = req.req, "sending response: {e}");
+        match wire {
+            // A peer's reply: if it approves an operation we saw requested, record its spends
+            // here too. This is how a guardian learns of spends it did not sign, without
+            // relying on the coordinator, and how it catches up after being offline.
+            Wire::Response(resp) if msg.from != coordinator => {
+                if let Some(note) = observed.peer_reply(&resp, &state) {
+                    debug!(req = resp.req, peer = resp.from, "{note}");
+                }
+                continue;
+            }
+            Wire::Response(_) => continue,
+            Wire::Request(_) if msg.from != coordinator => {
+                debug!(from = %msg.from, "ignoring a request not from the coordinator");
+                continue;
+            }
+            Wire::Request(req) => {
+                observed.request(&req);
+                // Announcements are applied whatever their age: during catch-up they are how
+                // this guardian learns what happened while it was away.
+                if matches!(req.body, RequestBody::Issued { .. }) {
+                    state.handle(&req.body, req.req, true);
+                    continue;
+                }
+                if !req.is_for(index) {
+                    continue;
+                }
+                let age = now().saturating_sub(msg.created_at.as_secs());
+                if age > max_age_secs {
+                    debug!(req = req.req, age, "ignoring stale request");
+                    continue;
+                }
+                let Some(body) = state.handle(&req.body, req.req, node.is_synced()) else { continue };
+                match &body {
+                    ResponseBody::Error { msg } => warn!(req = req.req, kind = req.body.kind(), "refusing: {msg}"),
+                    ResponseBody::Pong { .. } => debug!(req = req.req, "pong"),
+                    _ => info!(req = req.req, kind = req.body.kind(), "answered"),
+                }
+                let resp = Wire::Response(Response { v: VERSION, from: index, req: req.req, body });
+                if let Err(e) = node.send(resp.to_json()).await {
+                    warn!(req = req.req, "sending response: {e}");
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Requests seen in the group (addressed to any guardian), so peers' approvals can be matched
+/// to exactly what they approved. Bounded; old entries are dropped first.
+#[derive(Default)]
+struct Observed {
+    by_req: std::collections::HashMap<u64, Vec<(String, RequestBody)>>,
+    order: std::collections::VecDeque<u64>,
+}
+
+const OBSERVED_MAX: usize = 20_000;
+
+impl Observed {
+    fn request(&mut self, req: &Request) {
+        let digest = match &req.body {
+            RequestBody::Sign1 { items, context: Some(c), .. } => approval_digest("sign1", items, c),
+            RequestBody::Verify { items, context: Some(c), .. } => approval_digest("verify", items, c),
+            _ => return,
+        };
+        let entry = self.by_req.entry(req.req).or_default();
+        if entry.iter().any(|(d, _)| *d == digest) {
+            return;
+        }
+        entry.push((digest, req.body.clone()));
+        self.order.push_back(req.req);
+        while self.order.len() > OBSERVED_MAX {
+            if let Some(old) = self.order.pop_front() {
+                self.by_req.remove(&old);
+            }
+        }
+    }
+
+    /// Apply a peer's approval, if it matches a request we saw. Returns a note for the log.
+    fn peer_reply(&self, resp: &Response, state: &State) -> Option<String> {
+        let (approved, kind) = match &resp.body {
+            ResponseBody::Sign1 { approved: Some(d), .. } => (d, "sign1"),
+            ResponseBody::Verify { approved: Some(d), .. } => (d, "verify"),
+            _ => return None,
+        };
+        let body = self.by_req.get(&resp.req)?.iter().find(|(d, _)| d == approved).map(|(_, b)| b)?;
+        let r = match body {
+            RequestBody::Sign1 { items, context: Some(c), .. } if kind == "sign1" => {
+                let outputs: Vec<(u64, String)> = items.iter().map(|i| (i.amount, i.b.clone())).collect();
+                state.rules.apply_announcement(&state.ledger, &outputs, c, now())
+            }
+            RequestBody::Verify { items, context: Some(c), .. } if kind == "verify" => {
+                let ys: Vec<(String, u64)> = items
+                    .iter()
+                    .filter_map(|it| Some((to_hex_point(&conv::hash_to_curve(it.secret.as_bytes()).ok()?).ok()?, it.amount)))
+                    .collect();
+                state.rules.apply_peer_verify(&state.ledger, &ys, c, now())
+            }
+            _ => return None,
+        };
+        Some(match r {
+            Ok(Some(conflict)) => {
+                warn!(req = resp.req, peer = resp.from, "DOUBLE SPEND: {conflict}");
+                conflict
+            }
+            Ok(None) => format!("peer approval of {kind} applied"),
+            Err(e) => format!("peer approval of {kind} not applied: {e}"),
+        })
+    }
+}
+
+/// Publish this guardian's ledger totals as a signed, public Nostr event (NIP-78 app data,
+/// replaceable per keyset), so anyone can compare the ecash in circulation with the mint's
+/// reserves, and compare guardians with each other.
+async fn publish_ledger(node: &MarmotNode, state: &State, index: u16) {
+    let t = state.ledger.totals(now());
+    let content = serde_json::json!({
+        "keyset": state.keyset.keyset_id,
+        "guardian": index,
+        "issued": t.issued,
+        "redeemed": t.redeemed,
+        "outstanding": t.outstanding,
+        "issued_last_hour": t.signed_last_hour,
+        "cap_per_hour": t.cap_per_hour,
+        "double_spend_attempts": t.duplicates,
+        "digest": state.ledger.digest(),
+        "unit": state.keyset.unit,
+    });
+    let builder = NostrEventBuilder::new(NostrKind::Custom(LEDGER_KIND), content.to_string())
+        .tag(NostrTag::identifier(format!("{LEDGER_D_PREFIX}{}", state.keyset.keyset_id)));
+    match node.publish(builder).await {
+        Ok(id) => debug!(%id, outstanding = t.outstanding, "ledger published"),
+        Err(e) => warn!("publishing ledger: {e}"),
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -327,8 +467,13 @@ struct State {
 
 impl State {
     /// Answer one request. `None` means no reply is due (abort, issued).
-    fn handle(&mut self, body: &RequestBody, req: u64) -> Option<ResponseBody> {
+    /// Answer one request. `synced`: the node has replayed what it missed; until then this
+    /// guardian does not sign or check proofs, since it may not know of every spend.
+    fn handle(&mut self, body: &RequestBody, req: u64, synced: bool) -> Option<ResponseBody> {
         let err = |m: String| Some(ResponseBody::Error { msg: m });
+        if !synced && matches!(body, RequestBody::Sign1 { .. } | RequestBody::Verify { .. }) {
+            return err("catching up on group messages missed while offline".into());
+        }
         if let Some(k) = body_keyset(body) {
             if k != self.keyset.keyset_id {
                 return err(format!("unknown keyset {k}"));
@@ -368,7 +513,10 @@ impl State {
                     .and_then(|items| self.guardian.round1(req, &items, &mut OsRng))
                     .and_then(|parts| parts.iter().map(round1_to_wire).collect::<Result<Vec<_>, _>>());
                 match r {
-                    Ok(parts) => Some(ResponseBody::Sign1 { parts }),
+                    Ok(parts) => {
+                        let approved = context.as_ref().map(|c| approval_digest("sign1", items, c));
+                        Some(ResponseBody::Sign1 { parts, approved })
+                    }
                     Err(e) => err(e.to_string()),
                 }
             }
@@ -398,7 +546,10 @@ impl State {
                 match self.guardian.verify(&ys, &mut OsRng) {
                     Ok(partials) => {
                         match partials.iter().map(partial_to_wire).collect::<Result<Vec<_>, _>>() {
-                            Ok(partials) => Some(ResponseBody::Verify { partials }),
+                            Ok(partials) => {
+                                let approved = context.as_ref().map(|c| approval_digest("verify", items, c));
+                                Some(ResponseBody::Verify { partials, approved })
+                            }
                             Err(e) => err(e.to_string()),
                         }
                     }

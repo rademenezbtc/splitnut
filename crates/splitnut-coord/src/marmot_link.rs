@@ -212,7 +212,7 @@ impl GuardianLink for MarmotLink {
             context,
         };
         match self.hub.call(i, req, body).await? {
-            ResponseBody::Sign1 { parts } => parts.iter().map(round1_from_wire).collect::<Result<_, _>>().map_err(|e| bad(i, e)),
+            ResponseBody::Sign1 { parts, .. } => parts.iter().map(round1_from_wire).collect::<Result<_, _>>().map_err(|e| bad(i, e)),
             other => Err(bad(i, format!("unexpected {}", other.kind()))),
         }
     }
@@ -249,7 +249,7 @@ impl GuardianLink for MarmotLink {
             context,
         };
         match self.hub.call(i, req, body).await? {
-            ResponseBody::Verify { partials } => partials.iter().map(partial_from_wire).collect::<Result<_, _>>().map_err(|e| bad(i, e)),
+            ResponseBody::Verify { partials, .. } => partials.iter().map(partial_from_wire).collect::<Result<_, _>>().map_err(|e| bad(i, e)),
             other => Err(bad(i, format!("unexpected {}", other.kind()))),
         }
     }

@@ -12,6 +12,10 @@
 #     host" (examples/evil_mintd.rs) tries over-issuing, unbalanced swaps, forged inputs and
 #     double spends against the guardians; each must be refused.
 #
+#   * catch-up: guardian 1, offline for most of the run, restarts, replays what it missed from
+#     the relays and must then agree with the others exactly;
+#   * public ledgers: every guardian publishes signed totals to the relays, and an outside
+#     audit (examples/audit.rs) must find all three agreeing with the wallets;
 #   * the keys come from distributed key generation among the guardians (no dealer ever holds
 #     them); KEYGEN=dealer uses the trusted dealer instead.
 #
@@ -32,7 +36,7 @@ RELAYS="${RELAYS:-ws://127.0.0.1:7777}"
 RELAY_ARGS=(); for r in $RELAYS; do RELAY_ARGS+=(--relay "$r"); done
 
 (cd "$ROOT" && cargo build -q -p splitnut-dealer -p splitnut-coord -p splitnut-guardian -p splitnut-relay \
-  && cargo build -q -p splitnut-coord --example evil_mintd)
+  && cargo build -q -p splitnut-coord --example evil_mintd --example audit)
 rm -rf "$W"; mkdir -p "$W/mint" "$W/keys" "$W/logs"
 cleanup() { [ -n "${KEEP:-}" ] && { echo "KEEP set: processes left running; dashboard at $DASH"; return; }; kill $(jobs -p) 2>/dev/null || true; }
 trap cleanup EXIT
@@ -41,7 +45,7 @@ declare -A GPID
 start_guardian() {
   local i=$1
   "$SN/splitnut-guardian" run --share "$W/shares/guardian-$i.json" --keys "$W/keys/g$i.nsec" \
-    --coordinator "$COORD_NPUB" "${RELAY_ARGS[@]}" --cap-per-hour "$CAP" >> "$W/logs/guardian-$i.log" 2>&1 &
+    --coordinator "$COORD_NPUB" "${RELAY_ARGS[@]}" --cap-per-hour "$CAP" --publish-secs 5 >> "$W/logs/guardian-$i.log" 2>&1 &
   GPID[$i]=$!
 }
 wait_log() { # file pattern seconds
@@ -151,6 +155,13 @@ echo
 "$SN/examples/evil_mintd" --tls-dir "$W/certs" || { echo "FAIL: an attack was not refused"; exit 1; }
 echo
 
+echo "== restart guardian 1 (offline since the 20 sat send): it must replay what it missed"
+G1_FROM=$(wc -l < "$W/logs/guardian-1.log")
+start_guardian 1
+for _ in $(seq 120); do tail -n +"$((G1_FROM + 1))" "$W/logs/guardian-1.log" | grep -q "caught up with the group" && break; sleep 0.25; done
+tail -n +"$((G1_FROM + 1))" "$W/logs/guardian-1.log" | sed -E 's/\x1b\[[0-9;]*m//g' \
+  | grep -E "replayed group history|caught up with the group" | sed -E 's/^.*(splitnut_[a-z]+: )//' | cut -c1-140 | sed 's/^/   /'
+
 BA=$(balance "${A[@]}"); BB=$(balance "${B[@]}")
 echo "A: $BA sat, B: $BB sat, together $((BA + BB)) sat"
 sleep $(( ${HEARTBEAT:-2} + 1 ))   # let a heartbeat carry the latest ledgers
@@ -169,6 +180,10 @@ for g in st["guardians"]:
           f"signed this hour {l['signed_last_hour']} of {l['cap_per_hour']}, checked twice {l['duplicates']}")
 sys.exit(0 if ok else 1)
 PY
+echo "== outside audit: the guardians' signed public ledgers, fetched from the relays"
+sleep 6   # one publishing interval
+"$SN/examples/audit" --roster "$W/roster.json" "${RELAY_ARGS[@]}" --require-all --expect-outstanding "$((BA + BB))" \
+  || { echo "FAIL: public ledgers do not agree with the wallets"; exit 1; }
 shot dashboard
 echo "== coordinator: signers and latency per request"
 grep -E "blind_sign ok|verify_proofs ok|quorum unavailable: refusing" "$W/logs/coord.log" \

@@ -69,7 +69,10 @@ struct Tap(Arc<Mutex<TapInner>>);
 impl WritePolicy for Tap {
     fn admit_event<'a>(&'a self, event: &'a Event, _addr: &'a SocketAddr) -> BoxedFuture<'a, PolicyResult> {
         Box::pin(async move {
-            let hit = PLAINTEXT_MARKERS.iter().any(|m| event.content.contains(m));
+            // Only private traffic must be ciphertext; guardians' ledger totals (kind 30078) are
+            // public on purpose.
+            let private = matches!(event.kind.as_u16(), 445 | 1059);
+            let hit = private && PLAINTEXT_MARKERS.iter().any(|m| event.content.contains(m));
             let size = event.as_json().len();
             let mut tap = self.0.lock().unwrap();
             if tap.recent.len() == 20 {
@@ -101,6 +104,7 @@ fn kind_name(k: u16) -> &'static str {
         445 => "group message",
         1059 => "gift wrap (welcome)",
         10051 => "key package relays",
+        30078 => "public ledger (signed, plaintext on purpose)",
         _ => "other",
     }
 }

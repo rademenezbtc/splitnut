@@ -222,6 +222,29 @@ impl Ledger {
         Ok(())
     }
 
+    /// Digest of exactly which outputs this guardian counts as issued and which proofs as
+    /// redeemed. Guardians that saw the same history publish the same digest, so an auditor can
+    /// tell agreement on the totals from agreement on the details.
+    pub fn digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for (sql, tag) in [
+            ("SELECT b || ':' || amount FROM issued ORDER BY b", "issued"),
+            ("SELECT y || ':' || amount FROM redeemed WHERE verified = 1 ORDER BY y", "redeemed"),
+        ] {
+            h.update(tag.as_bytes());
+            if let Ok(mut st) = self.db.prepare(sql) {
+                if let Ok(rows) = st.query_map([], |r| r.get::<_, String>(0)) {
+                    for row in rows.flatten() {
+                        h.update(row.as_bytes());
+                        h.update(b"\n");
+                    }
+                }
+            }
+        }
+        hex::encode(h.finalize())
+    }
+
     pub fn totals(&self, now: u64) -> Totals {
         let sum = |sql: &str| self.db.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0);
         let issued = sum("SELECT COALESCE(SUM(amount), 0) FROM issued");
